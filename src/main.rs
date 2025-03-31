@@ -1,4 +1,8 @@
+use std::process::exit;
+
+use cli::Command;
 use color_eyre::eyre::Report;
+use log::info;
 
 pub mod cli;
 pub mod constants;
@@ -12,16 +16,15 @@ fn main() -> Result<(), Report> {
     let args = cli::parse_args();
 
     match args.command {
-        Some(cli::Command::Run(run_args)) => {
-            log::info!(
+        Some(Command::Run(run_args)) => {
+            info!(
                 "Starting bonka server on {}:{}",
-                run_args.host,
-                run_args.port
+                run_args.host, run_args.port
             );
         }
         None => {
             eprintln!("No command provided. Use --help for more information.");
-            std::process::exit(1);
+            exit(1);
         }
     }
 
