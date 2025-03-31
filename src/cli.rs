@@ -143,6 +143,4 @@ mod tests {
         assert!(matches!(args.command, Some(Command::Run(run_cmd)) if 
             run_cmd.host == DEFAULT_HOST && run_cmd.port == DEFAULT_PORT));
     }
-    
-
 }
