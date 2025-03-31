@@ -129,6 +129,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn no_command() {
         // Test with no subcommand
         let args = Args::parse_from(["bonka"]);
@@ -136,15 +137,12 @@ mod tests {
     }
     
     #[test]
-    fn command_parsing() {
-        // Test that we correctly parse the "run" subcommand
+    #[serial]
+    fn run_command_default() {
         let args = Args::parse_from(["bonka", "run"]);
-        assert!(matches!(args.command, Some(Command::Run(_))));
-        
-        // If you add more commands in the future, test them here
-        // For example:
-        // let args = Args::parse_from(["bonka", "status"]);
-        // assert!(matches!(args.command, Some(Command::Status(_))));
+        assert!(matches!(args.command, Some(Command::Run(run_cmd)) if 
+            run_cmd.host == DEFAULT_HOST && run_cmd.port == DEFAULT_PORT));
     }
+    
 
 }

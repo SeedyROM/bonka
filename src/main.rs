@@ -13,7 +13,6 @@ fn main() -> Result<(), Report> {
 
     match args.command {
         Some(cli::Command::Run(run_args)) => {
-            // bonka::run(run_args.host, run_args.port).expect("bonka server failed to start");
             log::info!(
                 "Starting bonka server on {}:{}",
                 run_args.host,
