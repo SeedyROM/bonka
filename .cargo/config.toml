@@ -1,3 +1,4 @@
 [alias]
 coverage = "llvm-cov --ignore-filename-regex=main|log"
 coverage-html = "llvm-cov --ignore-filename-regex=main|log --html"
+coverage-text = "llvm-cov --ignore-filename-regex=main|log --text"

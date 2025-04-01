@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use color_eyre::eyre::{self, Report};
-use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -9,40 +8,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 // Import your session manager and protocol messages
+use crate::kv::KeyValueStore;
 use crate::log;
 use crate::session::SessionManager;
 
 // Import protocol messages
-use crate::protocol::{Command, Request, Response, Result as ProtocolResult, Value};
-
-/// Simple key-value store using [`DashMap`](https://docs.rs/dashmap/6.1.0/dashmap/).
-struct KeyValueStore {
-    data: DashMap<String, Value>,
-}
-
-impl KeyValueStore {
-    fn new() -> Self {
-        KeyValueStore {
-            data: DashMap::new(),
-        }
-    }
-
-    fn get(&self, key: &str) -> Option<Value> {
-        self.data.get(key).map(|v| v.value().clone())
-    }
-
-    fn set(&self, key: String, value: Value) {
-        self.data.insert(key, value);
-    }
-
-    fn delete(&self, key: &str) -> bool {
-        self.data.remove(key).is_some()
-    }
-
-    fn list(&self) -> Vec<String> {
-        self.data.iter().map(|item| item.key().clone()).collect()
-    }
-}
+use crate::protocol::{Command, Request, Response, Result as ProtocolResult};
 
 // Server state
 struct ServerState {
@@ -240,6 +211,8 @@ async fn send_response(
 mod tests {
     use super::*;
 
+    use crate::kv::Value;
+
     // Test server setup and teardown
     struct TestServer {
         host: String,
@@ -336,7 +309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_and_get() {
+    async fn set_and_get() {
         let mut server = TestServer::new(8001);
         server.start().await;
 
@@ -369,7 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete() {
+    async fn delete() {
         let mut server = TestServer::new(8002);
         server.start().await;
 
@@ -406,7 +379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_nonexistent() {
+    async fn delete_nonexistent() {
         let mut server = TestServer::new(8003);
         server.start().await;
 
@@ -432,7 +405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_keys() {
+    async fn list_keys() {
         let mut server = TestServer::new(8004);
         server.start().await;
 
@@ -471,7 +444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_different_value_types() {
+    async fn different_value_types() {
         let mut server = TestServer::new(8005);
         server.start().await;
 
@@ -515,7 +488,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_concurrent_clients() {
+    async fn concurrent_clients() {
         let mut server = TestServer::new(8006);
         server.start().await;
 
@@ -590,7 +563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exit_command() {
+    async fn exit_command() {
         let mut server = TestServer::new(8007);
         server.start().await;
 
@@ -613,7 +586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invalid_message_format() {
+    async fn invalid_message_format() {
         let mut server = TestServer::new(8008);
         server.start().await;
 
@@ -643,7 +616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_management() {
+    async fn session_management() {
         let mut server = TestServer::new(8009);
         server.start().await;
 

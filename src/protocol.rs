@@ -2,20 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::kv::Value;
+
 pub type Id = u64;
 pub type Timestamp = u64;
-
-/// The `Value` enum represents the different types of values that can be stored in the key-value store.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Value {
-    String(String),
-    Bytes(Box<[u8]>),
-    Int(i64),
-    UInt(u64),
-    Float(f64),
-    Bool(bool),
-    Null,
-}
 
 /// The `Command` enum represents the different commands that can be executed against the key-value store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
