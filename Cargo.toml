@@ -23,12 +23,29 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 assert_cmd = "2.0.16"
+criterion = "0.5.1"
 predicates = "3.1.3"
 serial_test = "3.2.0"
 
+# Workspace configuration
+[lib]
+name = "bonka"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bonka"
+path = "src/bin/bonka.rs"
+
+# Benchmarks
+[[bench]]
+name = "bonka_benchmark"
+harness = false
+
+# Lints
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 
+# Release configuration
 [profile.release]
 strip = true
 opt-level = "z"
