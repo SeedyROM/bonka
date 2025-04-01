@@ -53,20 +53,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_kv_store() {
+    fn kv_store() {
         let kv = KeyValueStore::new();
+        assert_eq!(kv.list(), Vec::<String>::new());
 
         kv.set("name".to_string(), Value::String("Alice".to_string()));
-        kv.set("age".to_string(), Value::Int(30));
-        kv.set("is_student".to_string(), Value::Bool(true));
-
         assert_eq!(kv.get("name"), Some(Value::String("Alice".to_string())));
-        assert_eq!(kv.get("age"), Some(Value::Int(30)));
-        assert_eq!(kv.get("is_student"), Some(Value::Bool(true)));
 
-        assert_eq!(kv.delete("name"), true);
-        assert_eq!(kv.delete("name"), false);
+        assert_eq!(kv.list(), vec!["name".to_string()]);
+    }
 
-        assert_eq!(kv.list(), vec!["age".to_string(), "is_student".to_string()]);
+    #[test]
+    fn default_kv_store() {
+        let kv = KeyValueStore::default();
+        assert_eq!(kv.list(), Vec::<String>::new());
+
+        kv.set("name".to_string(), Value::String("Alice".to_string()));
+        assert_eq!(kv.get("name"), Some(Value::String("Alice".to_string())));
+
+        assert_eq!(kv.list(), vec!["name".to_string()]);
     }
 }

@@ -1,4 +1,4 @@
 [alias]
-coverage = "llvm-cov --ignore-filename-regex=main|log"
-coverage-html = "llvm-cov --ignore-filename-regex=main|log --html"
-coverage-text = "llvm-cov --ignore-filename-regex=main|log --text"
+coverage = "llvm-cov --ignore-filename-regex=log|bin/bonka"
+coverage-html = "llvm-cov --ignore-filename-regex=log|bin/bonka --html"
+coverage-text = "llvm-cov --ignore-filename-regex=log|bin/bonka --text"
