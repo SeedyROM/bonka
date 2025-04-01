@@ -1,4 +1,4 @@
-name: Rust CI
+name: tests
 
 on:
   push:
@@ -48,11 +48,21 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+      - name: Install cargo2junit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo2junit
+
+      - name: Run tests with XML output
+        run: |
+          RUSTC_BOOTSTRAP=1 cargo test -- -Z unstable-options --format json --report-time | cargo2junit > junit.xml
+
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          file: junit.xml
 # TODO(SeedyROM): Run benchmarks nightly and upload results to GitHub Pages
 #   benchmarks:
 #     name: Run Benchmarks

@@ -1,8 +1,10 @@
 # 📓 Bonka
 
-[![GitHub](https://img.shields.io/badge/github-enum--display-8da0cb?logo=github)](https://github.com/SeedyROM/bonka)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![GitHub](https://img.shields.io/badge/github-bonka-8da0cb?logo=GitHub)](https://github.com/SeedyROM/bonka)
+[![Tests](https://github.com/SeedyROM/bonka/actions/workflows/rust.yml/badge.svg)](https://github.com/SeedyROM/bonka/actions)
+[![Codecov](https://codecov.io/gh/SeedyROM/bonka/graph/badge.svg?token=jCYRVFKoQQ)](https://codecov.io/gh/SeedyROM/bonka)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## What does it mean?
 
