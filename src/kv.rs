@@ -18,6 +18,12 @@ pub struct KeyValueStore {
     data: DashMap<String, Value>,
 }
 
+impl Default for KeyValueStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyValueStore {
     pub fn new() -> Self {
         KeyValueStore {
