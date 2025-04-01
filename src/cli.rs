@@ -1,6 +1,6 @@
 use clap::Parser;
 
-pub const DEFAULT_HOST: &'static str = "::0";
+pub const DEFAULT_HOST: &'static str = "[::1]";
 pub const DEFAULT_PORT: u16 = 8379;
 
 #[derive(Debug, Parser)]

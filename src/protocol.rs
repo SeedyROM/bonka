@@ -14,6 +14,7 @@ pub enum Value {
     UInt(u64),
     Float(f64),
     Bool(bool),
+    Null,
 }
 
 /// The `Command` enum represents the different commands that can be executed against the key-value store.
@@ -37,7 +38,7 @@ pub enum Result {
 }
 
 /// The `Metadata` type is a key-value store for additional information associated with a request or response.
-type Metadata = HashMap<String, Value>;
+pub type Metadata = HashMap<String, Value>;
 
 /// The `Request` struct represents a request to the key-value store.
 /// It contains an optional ID (to correlate with the request), a timestamp, the result of the command execution,

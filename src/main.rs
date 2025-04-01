@@ -1,6 +1,6 @@
 use std::process::exit;
 
-use cli::Command;
+use cli::{Command, RunCommand};
 use color_eyre::eyre::Report;
 use log::info;
 
@@ -11,24 +11,21 @@ pub mod protocol;
 pub mod server;
 pub mod session;
 
-fn main() -> Result<(), Report> {
+#[tokio::main]
+async fn main() -> Result<(), Report> {
     log::setup()?;
     let args = cli::parse_args();
 
     match args.command {
-        Some(Command::Run(run_args)) => {
-            info!(
-                "Starting bonka server on {}:{}",
-                run_args.host, run_args.port
-            );
+        Some(Command::Run(RunCommand { host, port })) => {
+            info!("Starting bonka server on {}:{}", host, port);
+            server::run(host, port).await
         }
         None => {
             eprintln!("No command provided. Use --help for more information.");
             exit(1);
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -67,7 +64,7 @@ mod main {
                 .assert()
                 .success()
                 .stdout(predicates::str::contains(
-                    "Starting bonka server on ::0:8379",
+                    "Starting bonka server on [::1]:8379",
                 ));
         }
 
@@ -89,7 +86,7 @@ mod main {
                 .assert()
                 .success()
                 .stdout(predicates::str::contains(
-                    "Starting bonka server on ::0:9000",
+                    "Starting bonka server on [::1]:9000",
                 ));
         }
     }
