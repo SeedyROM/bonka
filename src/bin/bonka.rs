@@ -2,15 +2,8 @@ use std::process::exit;
 
 use cli::{Command, RunCommand};
 use color_eyre::eyre::Report;
-use log::info;
 
-pub mod cli;
-pub mod constants;
-pub mod kv;
-pub mod log;
-pub mod protocol;
-pub mod server;
-pub mod session;
+use bonka::{cli, log, server};
 
 #[tokio::main]
 async fn main() -> Result<(), Report> {
@@ -19,7 +12,7 @@ async fn main() -> Result<(), Report> {
 
     match args.command {
         Some(Command::Run(RunCommand { host, port })) => {
-            info!("Starting bonka server on {}:{}", host, port);
+            log::info!("Starting bonka server on {}:{}", host, port);
             server::run(host, port).await
         }
         None => {
