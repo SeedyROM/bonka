@@ -1,6 +1,6 @@
 use clap::Parser;
 
-pub const DEFAULT_HOST: &'static str = "[::1]";
+pub const DEFAULT_HOST: &str = "[::1]";
 pub const DEFAULT_PORT: u16 = 8379;
 
 #[derive(Debug, Parser)]
@@ -26,8 +26,8 @@ pub enum Command {
 #[clap(name = "run", about = "Run the bonka server")]
 pub struct RunCommand {
     #[clap(
-        long, 
-        default_value = DEFAULT_HOST, 
+        long,
+        default_value = DEFAULT_HOST,
         env = "BONKA_HOST",
         help = "The host to bind to")
     ]
@@ -45,13 +45,12 @@ pub fn parse_args() -> Args {
     Args::parse()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
-    use std::env;
     use serial_test::serial;
+    use std::env;
 
     #[test]
     #[serial]
@@ -64,22 +63,21 @@ mod tests {
 
         // Test with just the run command
         let args = Args::parse_from(["bonka", "run"]);
-        
+
         // Verify we get a Run command
         assert!(matches!(args.command, Some(Command::Run(run_cmd)) if 
             run_cmd.host == DEFAULT_HOST && run_cmd.port == DEFAULT_PORT));
-
     }
 
     #[test]
     fn command_line_args() {
         // Test command-line arguments
-        let args = Args::parse_from([
-            "bonka", "run", "--host", "127.0.0.1", "--port", "9000"
-        ]);
-        
+        let args = Args::parse_from(["bonka", "run", "--host", "127.0.0.1", "--port", "9000"]);
+
         // Verify we get a Run command
-        assert!(matches!(args.command, Some(Command::Run(run_cmd)) if run_cmd.host == "127.0.0.1" && run_cmd.port == 9000));
+        assert!(
+            matches!(args.command, Some(Command::Run(run_cmd)) if run_cmd.host == "127.0.0.1" && run_cmd.port == 9000)
+        );
     }
 
     #[test]
@@ -93,10 +91,12 @@ mod tests {
 
         // Parse with no command line args (should use env vars)
         let args = Args::parse_from(["bonka", "run"]);
-        
+
         // Verify we get a Run command
-        assert!(matches!(args.command, Some(Command::Run(run_cmd)) if run_cmd.host == "192.168.1.1" && run_cmd.port == 5000));
-        
+        assert!(
+            matches!(args.command, Some(Command::Run(run_cmd)) if run_cmd.host == "192.168.1.1" && run_cmd.port == 5000)
+        );
+
         // Clean up
         unsafe {
             env::remove_var("BONKA_HOST");
@@ -114,13 +114,13 @@ mod tests {
         }
 
         // Command line args should take precedence
-        let args = Args::parse_from([
-            "bonka", "run", "--host", "127.0.0.1", "--port", "9000"
-        ]);
-        
+        let args = Args::parse_from(["bonka", "run", "--host", "127.0.0.1", "--port", "9000"]);
+
         // Verify we get a Run command
-        assert!(matches!(args.command, Some(Command::Run(run_cmd)) if run_cmd.host == "127.0.0.1" && run_cmd.port == 9000));
-        
+        assert!(
+            matches!(args.command, Some(Command::Run(run_cmd)) if run_cmd.host == "127.0.0.1" && run_cmd.port == 9000)
+        );
+
         // Clean up
         unsafe {
             env::remove_var("BONKA_HOST");
@@ -135,7 +135,7 @@ mod tests {
         let args = Args::parse_from(["bonka"]);
         assert!(args.command.is_none());
     }
-    
+
     #[test]
     #[serial]
     fn run_command_default() {

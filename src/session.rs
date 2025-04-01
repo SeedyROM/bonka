@@ -32,7 +32,7 @@ impl Session {
         let origin = origin.into();
 
         let mut hasher = Sha3_256::new();
-        hasher.update(&origin.as_bytes());
+        hasher.update(origin.as_bytes());
 
         let app_secret = match std::env::var("BONKA_APP_SECRET") {
             Ok(secret) => secret.into_bytes().to_vec(),
@@ -60,7 +60,7 @@ impl Session {
             id,
             start_time: Instant::now(),
             last_activity: Instant::now(),
-            origin: origin.into(),
+            origin,
         }
     }
 
@@ -79,6 +79,12 @@ impl Session {
 pub struct SessionManager {
     sessions: HashMap<Id, Session>,
     origin_to_sessions: HashMap<String, Vec<Id>>,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionManager {
@@ -106,7 +112,7 @@ impl SessionManager {
         // Update the origin-to-sessions mapping
         self.origin_to_sessions
             .entry(origin_str)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(id);
 
         self.sessions.get(&id).unwrap()
