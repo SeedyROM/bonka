@@ -24,8 +24,20 @@ jobs:
       - name: Install Protobuf Compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      # Enhanced Rust cache configuration
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          # Using a more specific shared key
+          shared-key: "stable-rust-${{ hashFiles('**/Cargo.lock', '**/*.proto') }}"
+          # Only save cache on main/master branches to avoid cache pollution
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+          # Cache sccache compilation results as well if you're using it
+          cache-directories: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
 
       - name: Check code format
         run: cargo fmt --all -- --check
@@ -36,7 +48,19 @@ jobs:
       - name: Run tests
         run: cargo test --all-features
 
+      - name: Cache tools
+        id: cache-tools
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/cargo-llvm-cov
+            ~/.cargo/bin/cargo2junit
+          key: ${{ runner.os }}-tools-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-tools-
+
       - name: Install cargo-llvm-cov
+        if: steps.cache-tools.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -52,6 +76,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: Install cargo2junit
+        if: steps.cache-tools.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo2junit
@@ -78,6 +103,9 @@ jobs:
 
 #       - name: Cache dependencies
 #         uses: Swatinem/rust-cache@v2
+#         with:
+#           cache-on-failure: true
+#           shared-key: "stable-rust-${{ hashFiles('**/Cargo.lock') }}"
 
 #       - name: Run benchmarks
 #         run: cargo bench --no-run
