@@ -7,24 +7,83 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use crate::kv::KeyValueStore;
+use crate::kv::{self, KeyValueStore};
 use crate::log;
 use crate::proto::bonka::{CommandType, Request, Response, ResultType};
 use crate::session::SessionManager;
 
-/// Server state
 struct ServerState {
     session_manager: SessionManager,
     kv_store: KeyValueStore,
 }
 
-/// Get current timestamp
 fn get_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
 }
+
+// ===============================================
+// Helpers for creating responses
+// ===============================================
+
+#[inline(always)]
+fn create_success_response(id: Option<u64>) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultSuccess as i32,
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn create_value_response(id: Option<u64>, value: Option<kv::Value>) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultValue as i32,
+        value: value.map(|v| v.into()),
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn create_error_response(id: Option<u64>, message: String) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultError as i32,
+        error: Some(message),
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn create_keys_response(id: Option<u64>, keys: Vec<String>) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultKeys as i32,
+        keys,
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn create_exit_response(id: Option<u64>) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultExit as i32,
+        ..Default::default()
+    }
+}
+
+// ===============================================
+// End response helpers
+// ===============================================
 
 /// Run the server
 pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
@@ -164,115 +223,37 @@ async fn process_command(request: Request, state: &Arc<Mutex<ServerState>>) -> R
     let kv_store = &server_state.kv_store;
 
     match request.command_type() {
-        CommandType::CommandGet => {
-            if let Some(key) = request.key {
-                // Convert Option<Value> to Value and handle None case properly
-                match kv_store.get(&key) {
-                    Some(value) => Response {
-                        id: request.id,
-                        timestamp: get_timestamp(),
-                        result_type: ResultType::ResultValue as i32,
-                        value: Some(value.into()),
-                        ..Default::default()
-                    },
-                    None => Response {
-                        id: request.id,
-                        timestamp: get_timestamp(),
-                        result_type: ResultType::ResultValue as i32,
-                        value: None,
-                        ..Default::default()
-                    },
-                }
-            } else {
-                Response {
-                    id: request.id,
-                    timestamp: get_timestamp(),
-                    result_type: ResultType::ResultError as i32,
-                    error: Some("Key not provided".to_string()),
-                    ..Default::default()
-                }
+        CommandType::CommandGet => match request.key {
+            Some(key) => {
+                let value = kv_store.get(&key);
+                create_value_response(request.id, value)
             }
-        }
-        CommandType::CommandSet => {
-            if let Some(key) = request.key {
-                if let Some(value) = request.value {
-                    kv_store.set(key, value.into());
-                    Response {
-                        id: request.id,
-                        timestamp: get_timestamp(),
-                        result_type: ResultType::ResultSuccess as i32,
-                        ..Default::default()
-                    }
-                } else {
-                    Response {
-                        id: request.id,
-                        timestamp: get_timestamp(),
-                        result_type: ResultType::ResultError as i32,
-                        error: Some("Value not provided".to_string()),
-                        ..Default::default()
-                    }
-                }
-            } else {
-                Response {
-                    id: request.id,
-                    timestamp: get_timestamp(),
-                    result_type: ResultType::ResultError as i32,
-                    error: Some("Key not provided".to_string()),
-                    ..Default::default()
-                }
+            None => create_error_response(request.id, "Key not provided".to_string()),
+        },
+        CommandType::CommandSet => match (request.key, request.value) {
+            (Some(key), Some(value)) => {
+                kv_store.set(key, value.into());
+                create_success_response(request.id)
             }
-        }
-        CommandType::CommandDelete => {
-            if let Some(key) = request.key {
+            (None, _) => create_error_response(request.id, "Key not provided".to_string()),
+            (_, None) => create_error_response(request.id, "Value not provided".to_string()),
+        },
+        CommandType::CommandDelete => match request.key {
+            Some(key) => {
                 if kv_store.delete(&key) {
-                    Response {
-                        id: request.id,
-                        timestamp: get_timestamp(),
-                        result_type: ResultType::ResultSuccess as i32,
-                        ..Default::default()
-                    }
+                    create_success_response(request.id)
                 } else {
-                    Response {
-                        id: request.id,
-                        timestamp: get_timestamp(),
-                        result_type: ResultType::ResultError as i32,
-                        error: Some(format!("Key '{}' not found", key)),
-                        ..Default::default()
-                    }
-                }
-            } else {
-                Response {
-                    id: request.id,
-                    timestamp: get_timestamp(),
-                    result_type: ResultType::ResultError as i32,
-                    error: Some("Key not provided".to_string()),
-                    ..Default::default()
+                    create_error_response(request.id, format!("Key '{}' not found", key))
                 }
             }
-        }
+            None => create_error_response(request.id, "Key not provided".to_string()),
+        },
         CommandType::CommandList => {
             let keys = kv_store.list();
-            Response {
-                id: request.id,
-                timestamp: get_timestamp(),
-                result_type: ResultType::ResultKeys as i32,
-                keys,
-                ..Default::default()
-            }
+            create_keys_response(request.id, keys)
         }
-        CommandType::CommandExit => Response {
-            id: request.id,
-            timestamp: get_timestamp(),
-            result_type: ResultType::ResultExit as i32,
-            ..Default::default()
-        },
-        _ => Response {
-            id: request.id,
-            timestamp: get_timestamp(),
-            result_type: ResultType::ResultError as i32,
-            error: Some("Unknown command".to_string()),
-            ..Default::default()
-        },
+        CommandType::CommandExit => create_exit_response(request.id),
+        _ => create_error_response(request.id, "Unknown command".to_string()),
     }
 }
 
