@@ -1,33 +1,130 @@
 use bytes::Bytes;
 use color_eyre::eyre::{self, Report};
 use futures::{SinkExt, StreamExt};
-use serde::Serialize;
+use prost::Message;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-// Import your session manager and protocol messages
-use crate::kv::KeyValueStore;
+use crate::kv::{self, KeyValueStore};
 use crate::log;
+use crate::proto::bonka::{CommandType, Request, Response, ResultType};
 use crate::session::SessionManager;
 
-// Import protocol messages
-use crate::protocol::{Command, Request, Response, Result as ProtocolResult};
-
-// Server state
 struct ServerState {
     session_manager: SessionManager,
     kv_store: KeyValueStore,
 }
 
-// Get current timestamp
+#[inline(always)]
 fn get_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
 }
+
+// ===============================================
+// Helpers for creating responses / handling commands
+// ===============================================
+
+#[inline(always)]
+fn create_success_response(id: Option<u64>) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultSuccess as i32,
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn create_value_response(id: Option<u64>, value: Option<kv::Value>) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultValue as i32,
+        value: value.map(|v| v.into()),
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn create_error_response(id: Option<u64>, message: String) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultError as i32,
+        error: Some(message),
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn create_keys_response(id: Option<u64>, keys: Vec<String>) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultKeys as i32,
+        keys,
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn create_exit_response(id: Option<u64>) -> Response {
+    Response {
+        id,
+        timestamp: get_timestamp(),
+        result_type: ResultType::ResultExit as i32,
+        ..Default::default()
+    }
+}
+
+#[inline(always)]
+fn handle_get_command(request: &Request, kv_store: &KeyValueStore) -> Response {
+    match &request.key {
+        Some(key) => create_value_response(request.id, kv_store.get(key)),
+        None => create_error_response(request.id, "Key not provided".to_string()),
+    }
+}
+
+#[inline(always)]
+fn handle_set_command(request: &Request, kv_store: &KeyValueStore) -> Response {
+    match (&request.key, &request.value) {
+        (Some(key), Some(value)) => {
+            kv_store.set(key.clone(), value.clone().into());
+            create_success_response(request.id)
+        }
+        (None, _) => create_error_response(request.id, "Key not provided".to_string()),
+        (_, None) => create_error_response(request.id, "Value not provided".to_string()),
+    }
+}
+
+#[inline(always)]
+fn handle_delete_command(request: &Request, kv_store: &KeyValueStore) -> Response {
+    match &request.key {
+        Some(key) => {
+            if kv_store.delete(key) {
+                create_success_response(request.id)
+            } else {
+                create_error_response(request.id, format!("Key '{}' not found", key))
+            }
+        }
+        None => create_error_response(request.id, "Key not provided".to_string()),
+    }
+}
+
+#[inline(always)]
+fn handle_list_command(request: &Request, kv_store: &KeyValueStore) -> Response {
+    let keys = kv_store.list();
+    create_keys_response(request.id, keys)
+}
+
+// ===============================================
+// End response helpers
+// ===============================================
 
 /// Run the server
 pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
@@ -105,7 +202,7 @@ async fn handle_client(
         match result {
             Ok(bytes) => {
                 // Deserialize request using MessagePack
-                let request: Request = match rmp_serde::from_slice(&bytes) {
+                let request: Request = match Request::decode(bytes.as_ref()) {
                     Ok(req) => req,
                     Err(e) => {
                         log::error!("Failed to deserialize request: {}", e);
@@ -114,8 +211,9 @@ async fn handle_client(
                         let error_response = Response {
                             id: None,
                             timestamp: get_timestamp(),
-                            result: ProtocolResult::Error("Invalid request format".to_string()),
-                            metadata: None,
+                            result_type: ResultType::ResultError as i32,
+                            error: Some("Invalid request format".to_string()),
+                            ..Default::default()
                         };
 
                         send_response(&mut framed, &error_response).await?;
@@ -136,7 +234,7 @@ async fn handle_client(
                 send_response(&mut framed, &response).await?;
 
                 // Check if client is exiting
-                if matches!(response.result, ProtocolResult::Exit) {
+                if response.result_type() == ResultType::ResultExit {
                     log::info!("Client {} requested exit", addr);
                     break;
                 }
@@ -165,34 +263,13 @@ async fn process_command(request: Request, state: &Arc<Mutex<ServerState>>) -> R
     let server_state = state.lock().unwrap();
     let kv_store = &server_state.kv_store;
 
-    let result = match request.command {
-        Command::Get(key) => {
-            let value = kv_store.get(&key);
-            ProtocolResult::Value(value)
-        }
-        Command::Set(key, value) => {
-            kv_store.set(key, value);
-            ProtocolResult::Success
-        }
-        Command::Delete(key) => {
-            if kv_store.delete(&key) {
-                ProtocolResult::Success
-            } else {
-                ProtocolResult::Error(format!("Key '{}' not found", key))
-            }
-        }
-        Command::List => {
-            let keys = kv_store.list();
-            ProtocolResult::Keys(keys)
-        }
-        Command::Exit => ProtocolResult::Exit,
-    };
-
-    Response {
-        id: request.id, // Echo back the request ID for correlation
-        timestamp: get_timestamp(),
-        result,
-        metadata: None, // We could add server metadata here if needed
+    match request.command_type() {
+        CommandType::CommandGet => handle_get_command(&request, kv_store),
+        CommandType::CommandSet => handle_set_command(&request, kv_store),
+        CommandType::CommandDelete => handle_delete_command(&request, kv_store),
+        CommandType::CommandList => handle_list_command(&request, kv_store),
+        CommandType::CommandExit => create_exit_response(request.id),
+        _ => create_error_response(request.id, "Unknown command".to_string()),
     }
 }
 
@@ -203,20 +280,19 @@ async fn send_response(
     framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
     response: &Response,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Serialize response using MessagePack
-    let mut buf = Vec::new();
-    response.serialize(&mut rmp_serde::Serializer::new(&mut buf))?;
-
+    // Serialize response using protobuf
+    let encoded = response.encode_to_vec();
     // Send the response
-    framed.send(Bytes::from(buf)).await?;
+    framed.send(Bytes::from(encoded)).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::kv::Value;
+    use crate::kv;
+    use crate::proto::bonka::{self, CommandType, ResultType};
+    use prost::Message;
 
     // Test server setup and teardown
     struct TestServer {
@@ -278,27 +354,33 @@ mod tests {
         }
     }
 
+    // Helper function to create a protobuf Value from a kv::Value
+    fn create_proto_value(value: kv::Value) -> bonka::Value {
+        value.into()
+    }
+
     // Helper function to send a command and get response
     async fn send_command(
         framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
-        command: Command,
-    ) -> Response {
-        let request = Request {
-            id: None,
+        command_type: CommandType,
+        key: Option<String>,
+        value: Option<bonka::Value>,
+    ) -> bonka::Response {
+        let request = bonka::Request {
+            id: Some(1), // Use a test ID
             timestamp: get_timestamp(),
-            command,
-            metadata: None,
+            command_type: command_type as i32,
+            key,
+            value,
+            metadata: Default::default(),
         };
 
-        // Serialize request
-        let mut buf = Vec::new();
-        request
-            .serialize(&mut rmp_serde::Serializer::new(&mut buf))
-            .expect("Failed to serialize request");
+        // Serialize request using protobuf
+        let encoded = request.encode_to_vec();
 
         // Send request
         framed
-            .send(Bytes::from(buf))
+            .send(Bytes::from(encoded))
             .await
             .expect("Failed to send request");
 
@@ -310,7 +392,7 @@ mod tests {
             .expect("Failed to receive response");
 
         // Deserialize response
-        rmp_serde::from_slice(&bytes).expect("Failed to deserialize response")
+        bonka::Response::decode(bytes.as_ref()).expect("Failed to deserialize response")
     }
 
     #[tokio::test]
@@ -322,24 +404,39 @@ mod tests {
         let mut client = connect_client(&server.host, server.port).await;
 
         // Set a key
-        let set_cmd = Command::Set(
-            "test-key".to_string(),
-            Value::String("test-value".to_string()),
-        );
-        let set_response = send_command(&mut client, set_cmd).await;
+        let set_response = send_command(
+            &mut client,
+            CommandType::CommandSet,
+            Some("test-key".to_string()),
+            Some(create_proto_value(kv::Value::String(
+                "test-value".to_string(),
+            ))),
+        )
+        .await;
 
         // Check set was successful
-        assert!(matches!(set_response.result, ProtocolResult::Success));
+        assert_eq!(set_response.result_type(), ResultType::ResultSuccess);
 
         // Get the key
-        let get_cmd = Command::Get("test-key".to_string());
-        let get_response = send_command(&mut client, get_cmd).await;
+        let get_response = send_command(
+            &mut client,
+            CommandType::CommandGet,
+            Some("test-key".to_string()),
+            None,
+        )
+        .await;
 
         // Check the value is correct
-        if let ProtocolResult::Value(Some(Value::String(value))) = get_response.result {
+        assert_eq!(get_response.result_type(), ResultType::ResultValue);
+        assert!(get_response.value.is_some());
+        let proto_value = get_response.value.unwrap();
+
+        // Convert to a kv::Value and check
+        let kv_value: kv::Value = proto_value.into();
+        if let kv::Value::String(value) = kv_value {
             assert_eq!(value, "test-value");
         } else {
-            panic!("Expected Value::String, got {:?}", get_response.result);
+            panic!("Expected String value, got {:?}", kv_value);
         }
 
         // Clean up
@@ -355,29 +452,38 @@ mod tests {
         let mut client = connect_client(&server.host, server.port).await;
 
         // Set a key
-        let set_cmd = Command::Set("delete-key".to_string(), Value::String("value".to_string()));
-        let _ = send_command(&mut client, set_cmd).await;
+        let _ = send_command(
+            &mut client,
+            CommandType::CommandSet,
+            Some("delete-key".to_string()),
+            Some(create_proto_value(kv::Value::String("value".to_string()))),
+        )
+        .await;
 
         // Delete the key
-        let delete_cmd = Command::Delete("delete-key".to_string());
-        let delete_response = send_command(&mut client, delete_cmd).await;
+        let delete_response = send_command(
+            &mut client,
+            CommandType::CommandDelete,
+            Some("delete-key".to_string()),
+            None,
+        )
+        .await;
 
         // Check delete was successful
-        assert!(matches!(delete_response.result, ProtocolResult::Success));
+        assert_eq!(delete_response.result_type(), ResultType::ResultSuccess);
 
         // Try to get the deleted key
-        let get_cmd = Command::Get("delete-key".to_string());
-        let get_response = send_command(&mut client, get_cmd).await;
+        let get_response = send_command(
+            &mut client,
+            CommandType::CommandGet,
+            Some("delete-key".to_string()),
+            None,
+        )
+        .await;
 
         // Key should not exist
-        if let ProtocolResult::Value(value) = get_response.result {
-            assert!(value.is_none());
-        } else {
-            panic!(
-                "Expected ProtocolResult::Value(None), got {:?}",
-                get_response.result
-            );
-        }
+        assert_eq!(get_response.result_type(), ResultType::ResultValue);
+        assert!(get_response.value.is_none());
 
         // Clean up
         server.stop().await;
@@ -392,18 +498,18 @@ mod tests {
         let mut client = connect_client(&server.host, server.port).await;
 
         // Try to delete a non-existent key
-        let delete_cmd = Command::Delete("nonexistent-key".to_string());
-        let delete_response = send_command(&mut client, delete_cmd).await;
+        let delete_response = send_command(
+            &mut client,
+            CommandType::CommandDelete,
+            Some("nonexistent-key".to_string()),
+            None,
+        )
+        .await;
 
         // Should get an error
-        if let ProtocolResult::Error(err) = delete_response.result {
-            assert!(err.contains("not found"));
-        } else {
-            panic!(
-                "Expected ProtocolResult::Error, got {:?}",
-                delete_response.result
-            );
-        }
+        assert_eq!(delete_response.result_type(), ResultType::ResultError);
+        assert!(delete_response.error.is_some());
+        assert!(delete_response.error.unwrap().contains("not found"));
 
         // Clean up
         server.stop().await;
@@ -420,28 +526,31 @@ mod tests {
         // Add multiple keys
         let keys = vec!["key1", "key2", "key3"];
         for key in &keys {
-            let set_cmd = Command::Set(key.to_string(), Value::String(format!("value-{}", key)));
-            let _ = send_command(&mut client, set_cmd).await;
+            let _ = send_command(
+                &mut client,
+                CommandType::CommandSet,
+                Some(key.to_string()),
+                Some(create_proto_value(kv::Value::String(format!(
+                    "value-{}",
+                    key
+                )))),
+            )
+            .await;
         }
 
         // List all keys
-        let list_cmd = Command::List;
-        let list_response = send_command(&mut client, list_cmd).await;
+        let list_response = send_command(&mut client, CommandType::CommandList, None, None).await;
 
         // Check that all our keys are listed
-        if let ProtocolResult::Keys(response_keys) = list_response.result {
-            // Convert Vec<String> to Vec<&str> for easier comparison
-            let response_keys_str: Vec<&str> = response_keys.iter().map(|s| s.as_str()).collect();
+        assert_eq!(list_response.result_type(), ResultType::ResultKeys);
+        assert!(!list_response.keys.is_empty());
 
-            // Check each key is present
-            for key in keys {
-                assert!(response_keys_str.contains(&key));
-            }
-        } else {
-            panic!(
-                "Expected ProtocolResult::Keys, got {:?}",
-                list_response.result
-            );
+        // Convert Vec<String> to Vec<&str> for easier comparison
+        let response_keys_str: Vec<&str> = list_response.keys.iter().map(|s| s.as_str()).collect();
+
+        // Check each key is present
+        for key in keys {
+            assert!(response_keys_str.contains(&key));
         }
 
         // Clean up
@@ -456,36 +565,46 @@ mod tests {
         // Connect client
         let mut client = connect_client(&server.host, server.port).await;
 
-        // Test different value types
+        // Setup test cases with KV values
         let test_values = vec![
-            ("string-key", Value::String("string-value".to_string())),
-            ("int-key", Value::Int(42)),
-            ("float-key", Value::Float(3.14)),
-            ("bool-key", Value::Bool(true)),
-            ("null-key", Value::Null),
-            // You could add more complex types like arrays and maps if your Value enum supports them
+            ("string-key", kv::Value::String("string-value".to_string())),
+            ("int-key", kv::Value::Int(42)),
+            ("float-key", kv::Value::Float(1.337)),
+            ("bool-key", kv::Value::Bool(true)),
+            ("null-key", kv::Value::Null),
         ];
 
         // Set each value
         for (key, value) in &test_values {
-            let set_cmd = Command::Set(key.to_string(), value.clone());
-            let set_response = send_command(&mut client, set_cmd).await;
-            assert!(matches!(set_response.result, ProtocolResult::Success));
+            let proto_value = create_proto_value(value.clone());
+
+            let set_response = send_command(
+                &mut client,
+                CommandType::CommandSet,
+                Some(key.to_string()),
+                Some(proto_value),
+            )
+            .await;
+
+            assert_eq!(set_response.result_type(), ResultType::ResultSuccess);
         }
 
         // Get and verify each value
         for (key, expected_value) in test_values {
-            let get_cmd = Command::Get(key.to_string());
-            let get_response = send_command(&mut client, get_cmd).await;
+            let get_response = send_command(
+                &mut client,
+                CommandType::CommandGet,
+                Some(key.to_string()),
+                None,
+            )
+            .await;
 
-            if let ProtocolResult::Value(Some(value)) = get_response.result {
-                assert_eq!(value, expected_value);
-            } else {
-                panic!(
-                    "Expected value for key {}, got {:?}",
-                    key, get_response.result
-                );
-            }
+            assert_eq!(get_response.result_type(), ResultType::ResultValue);
+            assert!(get_response.value.is_some());
+
+            // Convert to a kv::Value and compare
+            let kv_value: kv::Value = get_response.value.unwrap().into();
+            assert_eq!(kv_value, expected_value);
         }
 
         // Clean up
@@ -516,20 +635,29 @@ mod tests {
                         let value = format!("value{}-{}", client_id, i);
 
                         // Set a key
-                        let set_cmd = Command::Set(key.clone(), Value::String(value.clone()));
-                        let set_response = send_command(&mut client, set_cmd).await;
-                        assert!(matches!(set_response.result, ProtocolResult::Success));
+                        let set_response = send_command(
+                            &mut client,
+                            CommandType::CommandSet,
+                            Some(key.clone()),
+                            Some(create_proto_value(kv::Value::String(value.clone()))),
+                        )
+                        .await;
+
+                        assert_eq!(set_response.result_type(), ResultType::ResultSuccess);
 
                         // Get the key back
-                        let get_cmd = Command::Get(key);
-                        let get_response = send_command(&mut client, get_cmd).await;
+                        let get_response =
+                            send_command(&mut client, CommandType::CommandGet, Some(key), None)
+                                .await;
 
-                        if let ProtocolResult::Value(Some(Value::String(response_value))) =
-                            get_response.result
-                        {
+                        assert_eq!(get_response.result_type(), ResultType::ResultValue);
+                        assert!(get_response.value.is_some());
+
+                        let kv_value: kv::Value = get_response.value.unwrap().into();
+                        if let kv::Value::String(response_value) = kv_value {
                             assert_eq!(response_value, value);
                         } else {
-                            panic!("Expected Value::String, got {:?}", get_response.result);
+                            panic!("Expected String value, got {:?}", kv_value);
                         }
                     }
                 })
@@ -543,24 +671,26 @@ mod tests {
 
         // Connect a new client to verify all keys are present
         let mut verification_client = connect_client(&server.host, server.port).await;
-        let list_cmd = Command::List;
-        let list_response = send_command(&mut verification_client, list_cmd).await;
+        let list_response = send_command(
+            &mut verification_client,
+            CommandType::CommandList,
+            None,
+            None,
+        )
+        .await;
 
-        if let ProtocolResult::Keys(keys) = list_response.result {
-            assert_eq!(keys.len(), client_count * operations_per_client);
+        assert_eq!(list_response.result_type(), ResultType::ResultKeys);
+        assert_eq!(
+            list_response.keys.len() as u32,
+            client_count * operations_per_client
+        );
 
-            // Verify each expected key exists
-            for client_id in 0..client_count {
-                for i in 0..operations_per_client {
-                    let expected_key = format!("client{}-key{}", client_id, i);
-                    assert!(keys.contains(&expected_key));
-                }
+        // Verify each expected key exists
+        for client_id in 0..client_count {
+            for i in 0..operations_per_client {
+                let expected_key = format!("client{}-key{}", client_id, i);
+                assert!(list_response.keys.contains(&expected_key));
             }
-        } else {
-            panic!(
-                "Expected ProtocolResult::Keys, got {:?}",
-                list_response.result
-            );
         }
 
         // Clean up
@@ -576,11 +706,10 @@ mod tests {
         let mut client = connect_client(&server.host, server.port).await;
 
         // Send exit command
-        let exit_cmd = Command::Exit;
-        let exit_response = send_command(&mut client, exit_cmd).await;
+        let exit_response = send_command(&mut client, CommandType::CommandExit, None, None).await;
 
         // Check exit response
-        assert!(matches!(exit_response.result, ProtocolResult::Exit));
+        assert_eq!(exit_response.result_type(), ResultType::ResultExit);
 
         // Try to send another command, should fail as connection should be closed
         let buf = client.next().await;
@@ -598,7 +727,7 @@ mod tests {
         // Connect client
         let mut client = connect_client(&server.host, server.port).await;
 
-        // Send invalid data (not a valid MessagePack serialized Request)
+        // Send invalid data (not a valid protobuf Request)
         let invalid_data = Bytes::from(vec![0, 1, 2, 3]);
         client
             .send(invalid_data)
@@ -611,10 +740,11 @@ mod tests {
             .await
             .expect("No response received")
             .expect("Failed to receive response");
-        let response: Response =
-            rmp_serde::from_slice(&response_bytes).expect("Failed to deserialize error response");
 
-        assert!(matches!(response.result, ProtocolResult::Error(_)));
+        let response = bonka::Response::decode(response_bytes.as_ref())
+            .expect("Failed to deserialize error response");
+
+        assert_eq!(response.result_type(), ResultType::ResultError);
 
         // Clean up
         server.stop().await;
@@ -629,38 +759,60 @@ mod tests {
         let mut client1 = connect_client(&server.host, server.port).await;
 
         // Set a key using first client
-        let set_cmd = Command::Set(
-            "session-key".to_string(),
-            Value::String("session-value".to_string()),
-        );
-        let set_response = send_command(&mut client1, set_cmd).await;
-        assert!(matches!(set_response.result, ProtocolResult::Success));
+        let set_response = send_command(
+            &mut client1,
+            CommandType::CommandSet,
+            Some("session-key".to_string()),
+            Some(create_proto_value(kv::Value::String(
+                "session-value".to_string(),
+            ))),
+        )
+        .await;
+
+        assert_eq!(set_response.result_type(), ResultType::ResultSuccess);
 
         // Connect second client
         let mut client2 = connect_client(&server.host, server.port).await;
 
         // Get the key using second client (should be visible to all clients)
-        let get_cmd = Command::Get("session-key".to_string());
-        let get_response = send_command(&mut client2, get_cmd).await;
+        let get_response = send_command(
+            &mut client2,
+            CommandType::CommandGet,
+            Some("session-key".to_string()),
+            None,
+        )
+        .await;
 
-        if let ProtocolResult::Value(Some(Value::String(value))) = get_response.result {
+        assert_eq!(get_response.result_type(), ResultType::ResultValue);
+        assert!(get_response.value.is_some());
+
+        let kv_value: kv::Value = get_response.value.unwrap().into();
+        if let kv::Value::String(value) = kv_value {
             assert_eq!(value, "session-value");
         } else {
-            panic!("Expected Value::String, got {:?}", get_response.result);
+            panic!("Expected String value, got {:?}", kv_value);
         }
 
         // Close first client with Exit command
-        let exit_cmd = Command::Exit;
-        let _ = send_command(&mut client1, exit_cmd).await;
+        let _ = send_command(&mut client1, CommandType::CommandExit, None, None).await;
 
         // Key should still be accessible from second client
-        let get_cmd = Command::Get("session-key".to_string());
-        let get_response = send_command(&mut client2, get_cmd).await;
+        let get_response = send_command(
+            &mut client2,
+            CommandType::CommandGet,
+            Some("session-key".to_string()),
+            None,
+        )
+        .await;
 
-        if let ProtocolResult::Value(Some(Value::String(value))) = get_response.result {
+        assert_eq!(get_response.result_type(), ResultType::ResultValue);
+        assert!(get_response.value.is_some());
+
+        let kv_value: kv::Value = get_response.value.unwrap().into();
+        if let kv::Value::String(value) = kv_value {
             assert_eq!(value, "session-value");
         } else {
-            panic!("Expected Value::String, got {:?}", get_response.result);
+            panic!("Expected String value, got {:?}", kv_value);
         }
 
         // Clean up
