@@ -24,19 +24,7 @@ jobs:
         with:
           components: clippy, rustfmt, llvm-tools-preview
 
-      - name: Cache Protobuf Compiler
-        id: cache-protoc
-        uses: actions/cache@v3
-        with:
-          path: |
-            /usr/bin/protoc
-            /usr/local/bin/protoc
-            /usr/include/google/protobuf
-            /usr/local/include/google/protobuf
-          key: ${{ runner.os }}-protoc-3.x-${{ hashFiles('.github/workflows/rust.yml') }}
-
       - name: Install Protobuf Compiler
-        if: steps.cache-protoc.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libprotobuf-dev
@@ -88,18 +76,6 @@ jobs:
       - name: Check code format
         run: cargo fmt --all -- --check
 
-      - name: Run tests
-        run: |
-          # Check if we need to run tests or if we can use cached results
-          if [[ ! -d target/debug/deps ]] || [[ $(find src -type f -name "*.rs" -newer target/debug/deps -print -quit 2>/dev/null) ]]; then
-            echo "Source files changed or test directory missing, running tests"
-            RUSTFLAGS="-C target-cpu=native" cargo test --all-features
-          else
-            echo "Using cached test results"
-            # Touch test files to update timestamps
-            find target/debug/deps -type f -executable -name "*-*" -exec touch {} \;
-          fi
-
       - name: Cache tools
         id: cache-tools
         uses: actions/cache@v3
@@ -117,8 +93,14 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: Generate code coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      - name: Install cargo2junit
+        if: steps.cache-tools.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo2junit
+
+      - name: Generate code coverage / tests
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info && RUSTC_BOOTSTRAP=1 cargo test -- -Z unstable-options --format json --report-time | cargo2junit > junit.xml
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
@@ -126,24 +108,6 @@ jobs:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-
-      - name: Install cargo2junit
-        if: steps.cache-tools.outputs.cache-hit != 'true'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo2junit
-
-      - name: Cache junit.xml
-        id: cache-junit
-        uses: actions/cache@v3
-        with:
-          path: junit.xml
-          key: ${{ runner.os }}-junit-${{ hashFiles('**/*.rs', '**/*.proto', '**/Cargo.lock') }}
-
-      - name: Run tests with XML output
-        if: steps.cache-junit.outputs.cache-hit != 'true'
-        run: |
-          RUSTC_BOOTSTRAP=1 cargo test -- -Z unstable-options --format json --report-time | cargo2junit > junit.xml
 
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
