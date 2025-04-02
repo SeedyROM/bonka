@@ -46,6 +46,6 @@ fn print_logo() {
         built_info::PKG_VERSION,
         built_info::PROFILE,
         built_info::TARGET,
-        built_info::GIT_COMMIT_HASH_SHORT.unwrap_or(""),
+        built_info::GIT_COMMIT_HASH_SHORT.unwrap_or("unknown"),
     );
 }

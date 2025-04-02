@@ -8,9 +8,9 @@ pub fn setup() -> Result<(), Report> {
     }
 
     let default_log_level = if cfg!(debug_assertions) {
-        "info"
+        "debug"
     } else {
-        "error"
+        "info"
     };
     unsafe { std::env::set_var("RUST_LOG", default_log_level) };
 
