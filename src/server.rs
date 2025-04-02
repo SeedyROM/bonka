@@ -17,6 +17,7 @@ struct ServerState {
     kv_store: KeyValueStore,
 }
 
+#[inline(always)]
 fn get_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -25,7 +26,7 @@ fn get_timestamp() -> u64 {
 }
 
 // ===============================================
-// Helpers for creating responses
+// Helpers for creating responses / handling commands
 // ===============================================
 
 #[inline(always)]
@@ -79,6 +80,46 @@ fn create_exit_response(id: Option<u64>) -> Response {
         result_type: ResultType::ResultExit as i32,
         ..Default::default()
     }
+}
+
+#[inline(always)]
+fn handle_get_command(request: &Request, kv_store: &KeyValueStore) -> Response {
+    match &request.key {
+        Some(key) => create_value_response(request.id, kv_store.get(key)),
+        None => create_error_response(request.id, "Key not provided".to_string()),
+    }
+}
+
+#[inline(always)]
+fn handle_set_command(request: &Request, kv_store: &KeyValueStore) -> Response {
+    match (&request.key, &request.value) {
+        (Some(key), Some(value)) => {
+            kv_store.set(key.clone(), value.clone().into());
+            create_success_response(request.id)
+        }
+        (None, _) => create_error_response(request.id, "Key not provided".to_string()),
+        (_, None) => create_error_response(request.id, "Value not provided".to_string()),
+    }
+}
+
+#[inline(always)]
+fn handle_delete_command(request: &Request, kv_store: &KeyValueStore) -> Response {
+    match &request.key {
+        Some(key) => {
+            if kv_store.delete(key) {
+                create_success_response(request.id)
+            } else {
+                create_error_response(request.id, format!("Key '{}' not found", key))
+            }
+        }
+        None => create_error_response(request.id, "Key not provided".to_string()),
+    }
+}
+
+#[inline(always)]
+fn handle_list_command(request: &Request, kv_store: &KeyValueStore) -> Response {
+    let keys = kv_store.list();
+    create_keys_response(request.id, keys)
 }
 
 // ===============================================
@@ -223,35 +264,10 @@ async fn process_command(request: Request, state: &Arc<Mutex<ServerState>>) -> R
     let kv_store = &server_state.kv_store;
 
     match request.command_type() {
-        CommandType::CommandGet => match request.key {
-            Some(key) => {
-                let value = kv_store.get(&key);
-                create_value_response(request.id, value)
-            }
-            None => create_error_response(request.id, "Key not provided".to_string()),
-        },
-        CommandType::CommandSet => match (request.key, request.value) {
-            (Some(key), Some(value)) => {
-                kv_store.set(key, value.into());
-                create_success_response(request.id)
-            }
-            (None, _) => create_error_response(request.id, "Key not provided".to_string()),
-            (_, None) => create_error_response(request.id, "Value not provided".to_string()),
-        },
-        CommandType::CommandDelete => match request.key {
-            Some(key) => {
-                if kv_store.delete(&key) {
-                    create_success_response(request.id)
-                } else {
-                    create_error_response(request.id, format!("Key '{}' not found", key))
-                }
-            }
-            None => create_error_response(request.id, "Key not provided".to_string()),
-        },
-        CommandType::CommandList => {
-            let keys = kv_store.list();
-            create_keys_response(request.id, keys)
-        }
+        CommandType::CommandGet => handle_get_command(&request, kv_store),
+        CommandType::CommandSet => handle_set_command(&request, kv_store),
+        CommandType::CommandDelete => handle_delete_command(&request, kv_store),
+        CommandType::CommandList => handle_list_command(&request, kv_store),
         CommandType::CommandExit => create_exit_response(request.id),
         _ => create_error_response(request.id, "Unknown command".to_string()),
     }
