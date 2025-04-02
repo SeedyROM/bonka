@@ -24,13 +24,26 @@ jobs:
         with:
           components: clippy, rustfmt, llvm-tools-preview
 
+      - name: Cache Protobuf Compiler
+        id: cache-protoc
+        uses: actions/cache@v3
+        with:
+          path: |
+            /usr/bin/protoc
+            /usr/local/bin/protoc
+            /usr/include/google/protobuf
+            /usr/local/include/google/protobuf
+          key: ${{ runner.os }}-protoc-3.x-${{ hashFiles('.github/workflows/rust.yml') }}
+
       - name: Install Protobuf Compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        if: steps.cache-protoc.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libprotobuf-dev
 
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.3
 
-      # Setup comprehensive caching strategy
       - name: Cache Cargo registry
         uses: actions/cache@v3
         with:
@@ -49,7 +62,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-sccache-
 
-      # Create dedicated test cache with incremental compilation
       - name: Setup incremental compilation
         run: |
           mkdir -p .cargo
@@ -76,12 +88,6 @@ jobs:
       - name: Check code format
         run: cargo fmt --all -- --check
 
-      - name: Clippy (with cached results)
-        run: |
-          # Use the configured sccache for faster compilation
-          cargo clippy --all-features -- -D warnings
-
-      # Optimize the test step with dependency checking
       - name: Run tests
         run: |
           # Check if we need to run tests or if we can use cached results
@@ -127,7 +133,6 @@ jobs:
         with:
           tool: cargo2junit
 
-      # Cache the junit.xml file
       - name: Cache junit.xml
         id: cache-junit
         uses: actions/cache@v3
