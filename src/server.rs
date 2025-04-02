@@ -31,6 +31,12 @@ fn get_timestamp() -> u64 {
 
 /// Run the server
 pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
+    // Get the address to bind to
+    let addr = format!("{}:{}", host.into(), port);
+
+    // Log server start
+    log::info!("Starting bonka server on {}", &addr);
+
     // Initialize server state
     let state = Arc::new(Mutex::new(ServerState {
         session_manager: SessionManager::new(),
@@ -41,6 +47,7 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
     let cleanup_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.tick().await;
         loop {
             interval.tick().await;
             let mut state = cleanup_state.lock().unwrap();
@@ -53,8 +60,6 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
             );
         }
     });
-
-    let addr = format!("{}:{}", host.into(), port);
 
     // Start the TCP server
     let listener = TcpListener::bind(&addr).await.map_err(eyre::Report::from)?;
