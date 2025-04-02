@@ -1,7 +1,7 @@
 use bonka::kv::KeyValueStore;
 use bonka::kv::Value;
 use bonka::proto;
-use bonka::proto::bonka::{CommandType, ResultType};
+use bonka::proto::{CommandType, ResultType};
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use futures::future::join_all;
@@ -116,13 +116,11 @@ fn bench_protocol(c: &mut Criterion) {
     group.bench_function("serialize_request", |b| {
         b.iter(|| {
             // Create a proto Value
-            let proto_value = proto::bonka::Value {
-                value: Some(proto::bonka::value::Value::StringValue(
-                    "test-value".to_string(),
-                )),
+            let proto_value = proto::Value {
+                value: Some(proto::value::Value::StringValue("test-value".to_string())),
             };
 
-            let request = proto::bonka::Request {
+            let request = proto::Request {
                 id: Some(1),
                 timestamp: get_timestamp(),
                 command_type: CommandType::CommandSet as i32,
@@ -141,13 +139,11 @@ fn bench_protocol(c: &mut Criterion) {
     group.bench_function("serialize_response", |b| {
         b.iter(|| {
             // Create a proto Value
-            let proto_value = proto::bonka::Value {
-                value: Some(proto::bonka::value::Value::StringValue(
-                    "test-value".to_string(),
-                )),
+            let proto_value = proto::Value {
+                value: Some(proto::value::Value::StringValue("test-value".to_string())),
             };
 
-            let response = proto::bonka::Response {
+            let response = proto::Response {
                 id: Some(1),
                 timestamp: get_timestamp(),
                 result_type: ResultType::ResultValue as i32,
@@ -164,13 +160,11 @@ fn bench_protocol(c: &mut Criterion) {
     });
 
     // Create a sample serialized request for deserialization benchmark
-    let proto_value = proto::bonka::Value {
-        value: Some(proto::bonka::value::Value::StringValue(
-            "test-value".to_string(),
-        )),
+    let proto_value = proto::Value {
+        value: Some(proto::value::Value::StringValue("test-value".to_string())),
     };
 
-    let sample_request = proto::bonka::Request {
+    let sample_request = proto::Request {
         id: Some(1),
         timestamp: get_timestamp(),
         command_type: CommandType::CommandGet as i32,
@@ -184,7 +178,7 @@ fn bench_protocol(c: &mut Criterion) {
     // Benchmark request deserialization
     group.bench_function("deserialize_request", |b| {
         b.iter(|| {
-            let request = proto::bonka::Request::decode(request_buf.as_slice()).unwrap();
+            let request = proto::Request::decode(request_buf.as_slice()).unwrap();
             black_box(request);
         })
     });
@@ -233,11 +227,11 @@ async fn server_benchmark() -> Result<f64, Box<dyn std::error::Error>> {
                     let value = format!("value{}-{}", client_id, i);
 
                     // Create a Set command with protobuf
-                    let proto_value = proto::bonka::Value {
-                        value: Some(proto::bonka::value::Value::StringValue(value)),
+                    let proto_value = proto::Value {
+                        value: Some(proto::value::Value::StringValue(value)),
                     };
 
-                    let request = proto::bonka::Request {
+                    let request = proto::Request {
                         id: Some((client_id * ops_per_client + i) as u64),
                         timestamp: get_timestamp(),
                         command_type: CommandType::CommandSet as i32,
@@ -252,7 +246,7 @@ async fn server_benchmark() -> Result<f64, Box<dyn std::error::Error>> {
 
                     // Receive response
                     let bytes = framed.next().await.unwrap().unwrap();
-                    let _response = proto::bonka::Response::decode(bytes.as_ref()).unwrap();
+                    let _response = proto::Response::decode(bytes.as_ref()).unwrap();
                 }
             })
         })

@@ -9,7 +9,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::kv::{self, KeyValueStore};
 use crate::log;
-use crate::proto::bonka::{CommandType, Request, Response, ResultType};
+use crate::proto::{CommandType, Request, Response, ResultType};
 use crate::session::SessionManager;
 
 struct ServerState {
@@ -291,7 +291,7 @@ async fn send_response(
 mod tests {
     use super::*;
     use crate::kv;
-    use crate::proto::bonka::{self, CommandType, ResultType};
+    use crate::proto::{self, CommandType, ResultType};
     use prost::Message;
 
     // Test server setup and teardown
@@ -355,7 +355,7 @@ mod tests {
     }
 
     // Helper function to create a protobuf Value from a kv::Value
-    fn create_proto_value(value: kv::Value) -> bonka::Value {
+    fn create_proto_value(value: kv::Value) -> proto::Value {
         value.into()
     }
 
@@ -364,9 +364,9 @@ mod tests {
         framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
         command_type: CommandType,
         key: Option<String>,
-        value: Option<bonka::Value>,
-    ) -> bonka::Response {
-        let request = bonka::Request {
+        value: Option<proto::Value>,
+    ) -> proto::Response {
+        let request = proto::Request {
             id: Some(1), // Use a test ID
             timestamp: get_timestamp(),
             command_type: command_type as i32,
@@ -392,7 +392,7 @@ mod tests {
             .expect("Failed to receive response");
 
         // Deserialize response
-        bonka::Response::decode(bytes.as_ref()).expect("Failed to deserialize response")
+        proto::Response::decode(bytes.as_ref()).expect("Failed to deserialize response")
     }
 
     #[tokio::test]
@@ -741,7 +741,7 @@ mod tests {
             .expect("No response received")
             .expect("Failed to receive response");
 
-        let response = bonka::Response::decode(response_bytes.as_ref())
+        let response = proto::Response::decode(response_bytes.as_ref())
             .expect("Failed to deserialize error response");
 
         assert_eq!(response.result_type(), ResultType::ResultError);

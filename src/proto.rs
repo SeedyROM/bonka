@@ -1,3 +1,1 @@
-pub mod bonka {
-    include!(concat!(env!("OUT_DIR"), "/bonka.rs"));
-}
+include!(concat!(env!("OUT_DIR"), "/bonka.rs"));

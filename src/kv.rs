@@ -16,42 +16,42 @@ pub enum Value {
 }
 
 /// Convert the `Value` enum into the protobuf format.
-impl From<Value> for proto::bonka::Value {
+impl From<Value> for proto::Value {
     fn from(value: Value) -> Self {
         match value {
-            Value::String(s) => proto::bonka::Value {
-                value: Some(proto::bonka::value::Value::StringValue(s)),
+            Value::String(s) => proto::Value {
+                value: Some(proto::value::Value::StringValue(s)),
             },
-            Value::Bytes(b) => proto::bonka::Value {
-                value: Some(proto::bonka::value::Value::BytesValue(b.to_vec())),
+            Value::Bytes(b) => proto::Value {
+                value: Some(proto::value::Value::BytesValue(b.to_vec())),
             },
-            Value::Int(i) => proto::bonka::Value {
-                value: Some(proto::bonka::value::Value::IntValue(i)),
+            Value::Int(i) => proto::Value {
+                value: Some(proto::value::Value::IntValue(i)),
             },
-            Value::UInt(u) => proto::bonka::Value {
-                value: Some(proto::bonka::value::Value::UintValue(u)),
+            Value::UInt(u) => proto::Value {
+                value: Some(proto::value::Value::UintValue(u)),
             },
-            Value::Float(f) => proto::bonka::Value {
-                value: Some(proto::bonka::value::Value::FloatValue(f)),
+            Value::Float(f) => proto::Value {
+                value: Some(proto::value::Value::FloatValue(f)),
             },
-            Value::Bool(b) => proto::bonka::Value {
-                value: Some(proto::bonka::value::Value::BoolValue(b)),
+            Value::Bool(b) => proto::Value {
+                value: Some(proto::value::Value::BoolValue(b)),
             },
-            Value::Null => proto::bonka::Value { value: None },
+            Value::Null => proto::Value { value: None },
         }
     }
 }
 
 /// Convert the protobuf format into the `Value` enum.
-impl From<proto::bonka::Value> for Value {
-    fn from(value: proto::bonka::Value) -> Self {
+impl From<proto::Value> for Value {
+    fn from(value: proto::Value) -> Self {
         match value.value {
-            Some(proto::bonka::value::Value::StringValue(s)) => Value::String(s),
-            Some(proto::bonka::value::Value::BytesValue(b)) => Value::Bytes(b.into_boxed_slice()),
-            Some(proto::bonka::value::Value::IntValue(i)) => Value::Int(i),
-            Some(proto::bonka::value::Value::UintValue(u)) => Value::UInt(u),
-            Some(proto::bonka::value::Value::FloatValue(f)) => Value::Float(f),
-            Some(proto::bonka::value::Value::BoolValue(b)) => Value::Bool(b),
+            Some(proto::value::Value::StringValue(s)) => Value::String(s),
+            Some(proto::value::Value::BytesValue(b)) => Value::Bytes(b.into_boxed_slice()),
+            Some(proto::value::Value::IntValue(i)) => Value::Int(i),
+            Some(proto::value::Value::UintValue(u)) => Value::UInt(u),
+            Some(proto::value::Value::FloatValue(f)) => Value::Float(f),
+            Some(proto::value::Value::BoolValue(b)) => Value::Bool(b),
             None => Value::Null,
         }
     }
