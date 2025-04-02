@@ -42,6 +42,16 @@ pub struct RunCommand {
 }
 
 pub fn parse_args() -> Args {
+    println!(r#"
+d8b                         d8b                 
+ ?88                         ?88                 
+  88b                         88b                
+  888888b  d8888b   88bd88b   888  d88' d888b8b  
+  88P `?8bd8P' ?88  88P' ?8b  888bd8P' d8P' ?88  
+ d88,  d8888b  d88 d88   88P d88888b   88b  ,88b 
+d888888P'`?8888P'd88'   88bd88' `?88b,`?88P'`88b
+    "#);
+
     Args::parse()
 }
 

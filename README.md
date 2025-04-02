@@ -54,7 +54,7 @@ Clone the repo, and run `cargo run -- run` to start the server. You can then use
 
 ## What's the status?
 
-This is a work in progress. The server is functional, but there are no clients yet. The server is also not optimized at all. It's a simple implementation to get the idea across. There are simple benchmarks setup to track performance improvements using [critireon](https://docs.rs/criterion/latest/criterion/) and (eventually) [flame](https://docs.rs/flame/latest/flame/) tracing.
+This is a work in progress. The server is functional, but there are no clients yet. The server is also not optimized at all. It's a simple implementation to get the idea across. There are simple benchmarks setup to track performance improvements using [criterion](https://docs.rs/criterion/latest/criterion/) and (eventually) [flame](https://docs.rs/flame/latest/flame/) tracing.
 
 ## Run The Benchmarks
 
