@@ -1,12 +1,13 @@
 use bonka::kv::KeyValueStore;
 use bonka::kv::Value;
-use bonka::protocol::{Command, Request, Response};
+use bonka::proto;
+use bonka::proto::bonka::{CommandType, ResultType};
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use futures::future::join_all;
 use futures::{SinkExt, StreamExt};
+use prost::Message;
 use rand::{Rng, distr::Alphanumeric};
-use serde::Serialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -114,20 +115,24 @@ fn bench_protocol(c: &mut Criterion) {
     // Benchmark request serialization
     group.bench_function("serialize_request", |b| {
         b.iter(|| {
-            let request = Request {
-                id: Some(1),
-                timestamp: get_timestamp(),
-                command: Command::Set(
-                    "test-key".to_string(),
-                    Value::String("test-value".to_string()),
-                ),
-                metadata: None,
+            // Create a proto Value
+            let proto_value = proto::bonka::Value {
+                value: Some(proto::bonka::value::Value::StringValue(
+                    "test-value".to_string(),
+                )),
             };
 
-            let mut buf = Vec::new();
-            request
-                .serialize(&mut rmp_serde::Serializer::new(&mut buf))
-                .unwrap();
+            let request = proto::bonka::Request {
+                id: Some(1),
+                timestamp: get_timestamp(),
+                command_type: CommandType::CommandSet as i32,
+                key: Some("test-key".to_string()),
+                value: Some(proto_value),
+                metadata: Default::default(),
+            };
+
+            // Serialize using Protocol Buffers
+            let buf = request.encode_to_vec();
             black_box(buf);
         })
     });
@@ -135,39 +140,51 @@ fn bench_protocol(c: &mut Criterion) {
     // Benchmark response serialization
     group.bench_function("serialize_response", |b| {
         b.iter(|| {
-            let response = Response {
-                id: Some(1),
-                timestamp: get_timestamp(),
-                result: bonka::protocol::Result::Value(Some(Value::String(
+            // Create a proto Value
+            let proto_value = proto::bonka::Value {
+                value: Some(proto::bonka::value::Value::StringValue(
                     "test-value".to_string(),
-                ))),
-                metadata: None,
+                )),
             };
 
-            let mut buf = Vec::new();
-            response
-                .serialize(&mut rmp_serde::Serializer::new(&mut buf))
-                .unwrap();
+            let response = proto::bonka::Response {
+                id: Some(1),
+                timestamp: get_timestamp(),
+                result_type: ResultType::ResultValue as i32,
+                value: Some(proto_value),
+                keys: vec![],
+                error: None,
+                metadata: Default::default(),
+            };
+
+            // Serialize using Protocol Buffers
+            let buf = response.encode_to_vec();
             black_box(buf);
         })
     });
 
     // Create a sample serialized request for deserialization benchmark
-    let sample_request = Request {
+    let proto_value = proto::bonka::Value {
+        value: Some(proto::bonka::value::Value::StringValue(
+            "test-value".to_string(),
+        )),
+    };
+
+    let sample_request = proto::bonka::Request {
         id: Some(1),
         timestamp: get_timestamp(),
-        command: Command::Get("test-key".to_string()),
-        metadata: None,
+        command_type: CommandType::CommandGet as i32,
+        key: Some("test-key".to_string()),
+        value: Some(proto_value),
+        metadata: Default::default(),
     };
-    let mut request_buf = Vec::new();
-    sample_request
-        .serialize(&mut rmp_serde::Serializer::new(&mut request_buf))
-        .unwrap();
+
+    let request_buf = sample_request.encode_to_vec();
 
     // Benchmark request deserialization
     group.bench_function("deserialize_request", |b| {
         b.iter(|| {
-            let request: Request = rmp_serde::from_slice(&request_buf).unwrap();
+            let request = proto::bonka::Request::decode(request_buf.as_slice()).unwrap();
             black_box(request);
         })
     });
@@ -215,24 +232,27 @@ async fn server_benchmark() -> Result<f64, Box<dyn std::error::Error>> {
                     let key = format!("client{}-key{}", client_id, i);
                     let value = format!("value{}-{}", client_id, i);
 
-                    // Create a Set command
-                    let request = Request {
+                    // Create a Set command with protobuf
+                    let proto_value = proto::bonka::Value {
+                        value: Some(proto::bonka::value::Value::StringValue(value)),
+                    };
+
+                    let request = proto::bonka::Request {
                         id: Some((client_id * ops_per_client + i) as u64),
                         timestamp: get_timestamp(),
-                        command: Command::Set(key.clone(), Value::String(value)),
-                        metadata: None,
+                        command_type: CommandType::CommandSet as i32,
+                        key: Some(key),
+                        value: Some(proto_value),
+                        metadata: Default::default(),
                     };
 
                     // Serialize and send
-                    let mut buf = Vec::new();
-                    request
-                        .serialize(&mut rmp_serde::Serializer::new(&mut buf))
-                        .unwrap();
+                    let buf = request.encode_to_vec();
                     framed.send(Bytes::from(buf)).await.unwrap();
 
                     // Receive response
                     let bytes = framed.next().await.unwrap().unwrap();
-                    let _response: Response = rmp_serde::from_slice(&bytes).unwrap();
+                    let _response = proto::bonka::Response::decode(bytes.as_ref()).unwrap();
                 }
             })
         })

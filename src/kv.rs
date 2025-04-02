@@ -1,6 +1,8 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
+use crate::proto;
+
 /// The `Value` enum represents the different types of values that can be stored in the key-value store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
@@ -11,6 +13,48 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Null,
+}
+
+/// Convert the `Value` enum into the protobuf format.
+impl From<Value> for proto::bonka::Value {
+    fn from(value: Value) -> Self {
+        match value {
+            Value::String(s) => proto::bonka::Value {
+                value: Some(proto::bonka::value::Value::StringValue(s)),
+            },
+            Value::Bytes(b) => proto::bonka::Value {
+                value: Some(proto::bonka::value::Value::BytesValue(b.to_vec())),
+            },
+            Value::Int(i) => proto::bonka::Value {
+                value: Some(proto::bonka::value::Value::IntValue(i)),
+            },
+            Value::UInt(u) => proto::bonka::Value {
+                value: Some(proto::bonka::value::Value::UintValue(u)),
+            },
+            Value::Float(f) => proto::bonka::Value {
+                value: Some(proto::bonka::value::Value::FloatValue(f)),
+            },
+            Value::Bool(b) => proto::bonka::Value {
+                value: Some(proto::bonka::value::Value::BoolValue(b)),
+            },
+            Value::Null => proto::bonka::Value { value: None },
+        }
+    }
+}
+
+/// Convert the protobuf format into the `Value` enum.
+impl From<proto::bonka::Value> for Value {
+    fn from(value: proto::bonka::Value) -> Self {
+        match value.value {
+            Some(proto::bonka::value::Value::StringValue(s)) => Value::String(s),
+            Some(proto::bonka::value::Value::BytesValue(b)) => Value::Bytes(b.into_boxed_slice()),
+            Some(proto::bonka::value::Value::IntValue(i)) => Value::Int(i),
+            Some(proto::bonka::value::Value::UintValue(u)) => Value::UInt(u),
+            Some(proto::bonka::value::Value::FloatValue(f)) => Value::Float(f),
+            Some(proto::bonka::value::Value::BoolValue(b)) => Value::Bool(b),
+            None => Value::Null,
+        }
+    }
 }
 
 /// Simple key-value store using [`DashMap`](https://docs.rs/dashmap/6.1.0/dashmap/).

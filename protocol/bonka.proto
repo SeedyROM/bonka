@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package bonka;
+
+// Value types that can be stored
+message Value {
+  oneof value {
+    string string_value = 1;
+    bytes bytes_value = 2;
+    int64 int_value = 3;
+    uint64 uint_value = 4;
+    double float_value = 5;
+    bool bool_value = 6;
+    // Null is represented by not setting any value
+  }
+}
+
+// Commands that can be executed
+enum CommandType {
+  COMMAND_UNSPECIFIED = 0;  // Default value
+  COMMAND_GET = 1;
+  COMMAND_SET = 2;
+  COMMAND_DELETE = 3;
+  COMMAND_LIST = 4;
+  COMMAND_EXIT = 5;
+}
+
+// Request message
+message Request {
+  optional uint64 id = 1;
+  uint64 timestamp = 2;
+  
+  // Command details
+  CommandType command_type = 3;
+  optional string key = 4;
+  optional Value value = 5;
+  
+  // Optional metadata as key-value pairs
+  map<string, Value> metadata = 6;
+}
+
+// Response result types
+enum ResultType {
+  RESULT_UNSPECIFIED = 0;  // Default value
+  RESULT_VALUE = 1;
+  RESULT_SUCCESS = 2;
+  RESULT_KEYS = 3;
+  RESULT_ERROR = 4;
+  RESULT_EXIT = 5;
+}
+
+// Response message
+message Response {
+  optional uint64 id = 1;
+  uint64 timestamp = 2;
+  
+  // Result details
+  ResultType result_type = 3;
+  optional Value value = 4;
+  repeated string keys = 5;  // For LIST command
+  optional string error = 6; // For ERROR result
+  
+  // Optional metadata
+  map<string, Value> metadata = 7;
+}
