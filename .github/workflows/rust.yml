@@ -91,8 +91,8 @@ jobs:
       - name: Run tests
         run: |
           # Check if we need to run tests or if we can use cached results
-          if [[ $(find src -type f -name "*.rs" -newer target/debug/deps -print -quit 2>/dev/null) ]]; then
-            echo "Source files changed, running tests"
+          if [[ ! -d target/debug/deps ]] || [[ $(find src -type f -name "*.rs" -newer target/debug/deps -print -quit 2>/dev/null) ]]; then
+            echo "Source files changed or test directory missing, running tests"
             RUSTFLAGS="-C target-cpu=native" cargo test --all-features
           else
             echo "Using cached test results"
