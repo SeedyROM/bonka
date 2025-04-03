@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::proto;
+use crate::{log, proto};
 
 /// The `Value` enum represents the different types of values that can be stored in the key-value store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,18 +76,23 @@ impl KeyValueStore {
     }
 
     pub fn get(&self, key: &str) -> Option<Value> {
+        log::debug!("Getting value for key: {}", key);
         self.data.get(key).map(|v| v.value().clone())
     }
 
     pub fn set(&self, key: String, value: Value) {
+        log::debug!("Setting value for key: {}", key);
+        log::debug!("Value: {:?}", value);
         self.data.insert(key, value);
     }
 
     pub fn delete(&self, key: &str) -> bool {
+        log::debug!("Deleting key: {}", key);
         self.data.remove(key).is_some()
     }
 
     pub fn list(&self) -> Vec<String> {
+        log::debug!("Listing all keys");
         self.data.iter().map(|item| item.key().clone()).collect()
     }
 }
