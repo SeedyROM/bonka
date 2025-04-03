@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Instant};
 use rand::{TryRngCore, rngs::OsRng};
 use sha3::{Digest, Sha3_256};
 
-use crate::constants::DEFAULT_APP_SECRET;
+use crate::{constants::DEFAULT_APP_SECRET, log};
 
 /// Session ID is a unique identifier for each session.
 /// It is generated based on the session's origin and a secret application key.
@@ -37,7 +37,7 @@ impl Session {
         let app_secret = match std::env::var("BONKA_APP_SECRET") {
             Ok(secret) => secret.into_bytes().to_vec(),
             Err(_) => {
-                tracing::warn!(
+                log::warn!(
                     "BONKA_APP_SECRET environment variable not set. Using default application secret."
                 );
                 DEFAULT_APP_SECRET.to_vec()

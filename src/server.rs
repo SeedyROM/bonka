@@ -151,7 +151,7 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
             state
                 .session_manager
                 .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
-            log::info!(
+            log::debug!(
                 "Cleaned up inactive sessions. Current count: {}",
                 state.session_manager.session_count()
             );
@@ -192,7 +192,11 @@ async fn handle_client(
         session.id
     };
 
-    log::info!("Created session {} for client {}", session_id, addr);
+    log::info!(
+        "Created session {} for client {}",
+        base62::encode(session_id),
+        addr
+    );
 
     // Use LengthDelimitedCodec for framing
     let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
@@ -249,6 +253,11 @@ async fn handle_client(
     // Clean up session
     {
         let mut server_state = state.lock().unwrap();
+        log::info!(
+            "Removing session {} for client {}",
+            base62::encode(session_id),
+            addr
+        );
         server_state.session_manager.remove_session(session_id);
     }
 
