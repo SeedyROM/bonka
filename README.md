@@ -33,10 +33,10 @@ The plan is to create libraries for various languages so that you can use Bonka 
 
 ### Planned Libraries
 
+- [x] Python
 - [ ] Rust
     - This comes directly from the server code since the APIs are the same.
     - The client lib has not been written yet and the current test suite is only from the server.
-- [ ] Python
 - [ ] NodeJS
 
 
