@@ -1,0 +1,13 @@
+.venv
+venv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.whl
+dist/
+build/
+*.egg-info/
+*.egg
+*.log
+*.pot
