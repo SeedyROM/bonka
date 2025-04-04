@@ -5,6 +5,7 @@ use prost::Message;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::kv::{self, KeyValueStore};
@@ -126,8 +127,56 @@ fn handle_list_command(request: &Request, kv_store: &KeyValueStore) -> Response 
 // End response helpers
 // ===============================================
 
+fn set_file_descriptor_limits() -> Result<(), Box<dyn std::error::Error>> {
+    // Try to get the current limits
+    let mut rlimit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+
+    // Get current limits
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlimit) } == 0 {
+        // Try to set higher limits if needed
+        let desired_soft_limit = 65536;
+
+        if rlimit.rlim_max < desired_soft_limit as libc::rlim_t {
+            // Log that we can't set as high as we want
+            log::warn!(
+                "System hard limit for file descriptors is {} which is lower than desired {}. Consider increasing system limits.",
+                rlimit.rlim_max,
+                desired_soft_limit
+            );
+
+            // Set to max allowed
+            rlimit.rlim_cur = rlimit.rlim_max;
+        } else {
+            // We can set to our desired limit
+            rlimit.rlim_cur = desired_soft_limit as libc::rlim_t;
+        }
+
+        // Apply the new limits
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlimit) } != 0 {
+            log::warn!(
+                "Failed to set file descriptor limit: {}",
+                std::io::Error::last_os_error()
+            );
+        } else {
+            log::info!("Set file descriptor limit to {}", rlimit.rlim_cur);
+        }
+    } else {
+        log::warn!(
+            "Failed to get file descriptor limits: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    Ok(())
+}
+
 /// Run the server
 pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
+    set_file_descriptor_limits().ok();
+
     // Get the address to bind to
     let addr = format!("{}:{}", host.into(), port);
 
@@ -160,21 +209,91 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
 
     // Start the TCP server
     let listener = TcpListener::bind(&addr).await.map_err(eyre::Report::from)?;
+
+    let socket = socket2::Socket::from(listener.into_std()?);
+    socket.set_nonblocking(true)?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.set_keepalive(true)?;
+    socket.set_send_buffer_size(1024 * 1024)?;
+    socket.set_recv_buffer_size(1024 * 1024)?;
+
+    let listener = TcpListener::from_std(socket.into())?;
+
     log::info!("Server listening on {}", addr);
 
-    while let Ok((stream, addr)) = listener.accept().await {
-        log::info!("New connection from: {}", addr);
-        let client_state = Arc::clone(&state);
-
-        // Handle each client in a separate task
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, addr.to_string(), client_state).await {
-                log::error!("Error handling client {}: {}", addr, e);
+    // Create a semaphore to limit max concurrent connections
+    let max_connections = std::env::var("BONKA_CONNECTION_LIMIT")
+        .ok()
+        .and_then(|limit| limit.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            // Get system limit and set to half of that, or default to a reasonable value
+            let mut rlimit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlimit) } == 0 {
+                // Set to half of the soft limit to leave room for other file descriptors
+                (rlimit.rlim_cur as usize / 2).max(1000)
+            } else {
+                1000 // Default fallback
             }
         });
-    }
 
-    Ok(())
+    log::info!(
+        "Server configured with maximum of {} concurrent connections",
+        max_connections
+    );
+    let connection_limiter = Arc::new(Semaphore::new(max_connections));
+
+    // Backoff parameters
+    let base_delay = Duration::from_millis(50);
+    let max_delay = Duration::from_secs(5);
+    let mut current_delay = base_delay;
+
+    loop {
+        // Acquire a permit from the semaphore before accepting a new connection
+        let permit = connection_limiter.clone().acquire_owned().await?;
+
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                log::info!("New connection from: {}", addr);
+                let client_state = Arc::clone(&state);
+
+                // Reset backoff delay on successful connection
+                current_delay = base_delay;
+
+                // Handle each client in a separate task
+                tokio::spawn(async move {
+                    // The permit is moved into this task and will be dropped when the task completes
+                    let _permit = permit;
+
+                    if let Err(e) = handle_client(stream, addr.to_string(), client_state).await {
+                        log::error!("Error handling client {}: {}", addr, e);
+                    }
+                });
+            }
+            Err(e) => {
+                log::error!("Failed to accept connection: {}", e);
+                drop(permit); // Release the permit on error
+
+                // Apply exponential backoff with jitter
+                let jitter_factor = rand::random::<f32>() * 0.5 + 0.75; // Random float between 0.75 and 1.25
+                let jittered_delay = Duration::from_millis(
+                    (current_delay.as_millis() as f32 * jitter_factor) as u64,
+                );
+
+                log::debug!(
+                    "Backing off for {}ms before next accept attempt",
+                    jittered_delay.as_millis()
+                );
+                tokio::time::sleep(jittered_delay).await;
+
+                // Increase backoff delay for next failure (exponential)
+                current_delay = std::cmp::min(current_delay * 2, max_delay);
+            }
+        }
+    }
 }
 
 /// Handle a client connection
@@ -185,6 +304,9 @@ async fn handle_client(
     addr: String,
     state: Arc<Mutex<ServerState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Set socket options for better performance
+    stream.set_nodelay(true)?;
+
     // Create a session for this client
     let session_id = {
         let mut server_state = state.lock().unwrap();
