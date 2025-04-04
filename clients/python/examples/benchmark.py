@@ -22,6 +22,7 @@ class BenchmarkConfig:
     max_concurrency: int = 20
     target_ops_per_second: Optional[int] = None
     report_interval: int = 5
+    connection_pool_size: int = 10  # Added connection pool size
 
 
 # Generate random string of specified length
@@ -29,6 +30,45 @@ def random_string(length: int) -> str:
     return "".join(
         random.choice(string.ascii_letters + string.digits) for _ in range(length)
     )
+
+
+# Simple connection pool to reuse connections
+class ConnectionPool:
+    def __init__(self, host: str, port: int, max_size: int):
+        self.host = host
+        self.port = port
+        self.max_size = max_size
+        self.available = asyncio.Queue()
+        self.size = 0
+        self.lock = asyncio.Lock()
+
+    async def get(self):
+        # Try to get an existing connection
+        try:
+            return await asyncio.wait_for(self.available.get(), timeout=0.1)
+        except asyncio.TimeoutError:
+            # No connection available, create a new one if under max size
+            async with self.lock:
+                if self.size < self.max_size:
+                    self.size += 1
+                    client = BonkaClient(host=self.host, port=self.port)
+                    try:
+                        client.connect()
+                        return client
+                    except Exception as e:
+                        self.size -= 1
+                        raise e
+                else:
+                    # Wait for a connection to become available
+                    return await self.available.get()
+
+    async def release(self, client):
+        if client and client.connected:
+            await self.available.put(client)
+        else:
+            # If client disconnected, reduce pool size
+            async with self.lock:
+                self.size -= 1
 
 
 # Metrics tracking class
@@ -114,31 +154,28 @@ async def client_worker(
     metrics: BenchmarkMetrics,
     semaphore: asyncio.Semaphore,
     stop_event: asyncio.Event,
+    connection_pool: ConnectionPool,
 ):
-    client = BonkaClient(host=config.host, port=config.port)
+    operations_done = 0
+    rate_limiter = None
+
+    # Create a rate limiter if target ops/sec is specified
+    if config.target_ops_per_second:
+        # Calculate sleep time between operations to achieve target rate
+        sleep_time = 1.0 / (config.target_ops_per_second / config.num_clients)
+        rate_limiter = asyncio.create_task(asyncio.sleep(0))  # Initial no-op task
 
     try:
-        # Connect to the server
-        client.connect()
-        print(f"Client {client_id} connected")
+        while (
+            operations_done < config.operations_per_client and not stop_event.is_set()
+        ):
+            if rate_limiter and not rate_limiter.done():
+                await rate_limiter
 
-        operations_done = 0
-        rate_limiter = None
+            # Get a connection from the pool
+            client = await connection_pool.get()
 
-        # Create a rate limiter if target ops/sec is specified
-        if config.target_ops_per_second:
-            # Calculate sleep time between operations to achieve target rate
-            sleep_time = 1.0 / (config.target_ops_per_second / config.num_clients)
-            rate_limiter = asyncio.create_task(asyncio.sleep(0))  # Initial no-op task
-
-        try:
-            while (
-                operations_done < config.operations_per_client
-                and not stop_event.is_set()
-            ):
-                if rate_limiter and not rate_limiter.done():
-                    await rate_limiter
-
+            try:
                 # Choose a random operation
                 async with semaphore:
                     await asyncio.to_thread(
@@ -149,31 +186,32 @@ async def client_worker(
                         config,
                         metrics,
                     )
+            finally:
+                # Return the connection to the pool
+                await connection_pool.release(client)
 
-                operations_done += 1
+            operations_done += 1
 
-                # Set up the next rate limit wait if needed
-                if config.target_ops_per_second:
-                    rate_limiter = asyncio.create_task(asyncio.sleep(sleep_time))
-
-        except Exception as e:
-            print(f"Client {client_id} error during operations: {e}")
-            metrics.failures += 1
+            # Set up the next rate limit wait if needed
+            if config.target_ops_per_second:
+                rate_limiter = asyncio.create_task(asyncio.sleep(sleep_time))
 
     except Exception as e:
-        print(f"Client {client_id} failed to connect: {e}")
+        print(f"Client {client_id} error during operations: {e}")
         metrics.failures += 1
 
-    finally:
-        # Disconnect from server
-        if client.connected:
-            try:
-                client.disconnect()
-                print(
-                    f"Client {client_id} disconnected after {operations_done} operations"
-                )
-            except Exception as e:
-                print(f"Client {client_id} error during disconnect: {e}")
+
+async def perform_random_operation_async(
+    client: BonkaClient,
+    client_id: int,
+    op_num: int,
+    config: BenchmarkConfig,
+    metrics: BenchmarkMetrics,
+):
+    # Adapt the perform_random_operation function to be async
+    return await asyncio.to_thread(
+        perform_random_operation, client, client_id, op_num, config, metrics
+    )
 
 
 def perform_random_operation(
@@ -256,6 +294,7 @@ async def run_benchmark(config: BenchmarkConfig):
     )
     print(f"Server: {config.host}:{config.port}")
     print(f"Value size: {config.value_size} bytes")
+    print(f"Connection pool size: {config.connection_pool_size}")
     if config.target_ops_per_second:
         print(f"Target throughput: {config.target_ops_per_second} ops/sec")
 
@@ -264,6 +303,11 @@ async def run_benchmark(config: BenchmarkConfig):
 
     # Create semaphore to limit concurrent operations
     semaphore = asyncio.Semaphore(config.max_concurrency)
+
+    # Create connection pool
+    connection_pool = ConnectionPool(
+        config.host, config.port, config.connection_pool_size
+    )
 
     # Create stop event
     stop_event = asyncio.Event()
@@ -275,7 +319,9 @@ async def run_benchmark(config: BenchmarkConfig):
 
     # Create and start client workers
     client_tasks = [
-        asyncio.create_task(client_worker(i, config, metrics, semaphore, stop_event))
+        asyncio.create_task(
+            client_worker(i, config, metrics, semaphore, stop_event, connection_pool)
+        )
         for i in range(config.num_clients)
     ]
 
@@ -347,6 +393,12 @@ def main():
         default=5,
         help="Stats reporting interval in seconds",
     )
+    parser.add_argument(
+        "--connection-pool-size",
+        type=int,
+        default=10,
+        help="Number of connections in the pool",
+    )
 
     args = parser.parse_args()
 
@@ -359,6 +411,7 @@ def main():
         max_concurrency=args.concurrency,
         target_ops_per_second=args.target_rate,
         report_interval=args.report_interval,
+        connection_pool_size=args.connection_pool_size,
     )
 
     # Run the benchmark
