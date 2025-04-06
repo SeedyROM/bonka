@@ -466,6 +466,7 @@ async fn handle_client(
 /// Process a command and return a response
 ///
 /// This function processes a command from a client request and returns a response.
+#[inline(always)]
 async fn process_command(
     request: Request,
     state: &Arc<Mutex<ServerState>>,
@@ -488,6 +489,7 @@ async fn process_command(
 /// Send a response to the client
 ///
 /// This function serializes the response using MessagePack and sends it to the client.
+#[inline(always)]
 async fn send_response(
     framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
     response: &Response,
