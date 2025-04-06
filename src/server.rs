@@ -13,6 +13,60 @@ use crate::log;
 use crate::proto::{CommandType, Request, Response, ResultType};
 use crate::session::SessionManager;
 
+/// Run the server
+///
+/// This function initializes the server, sets up the listener, and starts accepting connections.
+///
+/// ## Arguments
+///
+/// * `host` - The host address to bind to.
+/// * `port` - The port to bind to.
+///
+/// ## Returns
+///
+/// * `Result<(), ServerError>` - Returns Ok if the server runs successfully, or an error if it fails.
+pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> {
+    set_file_descriptor_limits();
+
+    // Get the address to bind to
+    let addr = format!("{}:{}", host.into(), port);
+    log::info!("Starting bonka server on {}", &addr);
+
+    // Initialize server state
+    let state = init_server_state();
+
+    // Start session cleanup task
+    tokio::spawn(run_session_cleanup(state.clone()));
+
+    // Create and configure the listener
+    let listener = create_listener(&addr).await?;
+    log::info!("Server listening on {}", addr);
+
+    // Create a semaphore to limit max concurrent connections
+    let max_connections = get_max_connections();
+    let connection_limiter = Arc::new(Semaphore::new(max_connections));
+    log::info!(
+        "Server configured with maximum of {} concurrent connections",
+        max_connections
+    );
+
+    // Backoff parameters
+    let base_delay = Duration::from_millis(50);
+    let max_delay = Duration::from_secs(5);
+    let mut current_delay = base_delay;
+
+    // Main connection acceptance loop
+    run_connection_loop(
+        listener,
+        state,
+        connection_limiter,
+        &mut current_delay,
+        base_delay,
+        max_delay,
+    )
+    .await
+}
+
 /// Error type for the server
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -61,6 +115,10 @@ struct ServerState {
     session_manager: SessionManager,
     kv_store: KeyValueStore,
 }
+
+// ===============================================
+// General helpers
+// ===============================================
 
 #[inline(always)]
 fn get_timestamp() -> u64 {
@@ -507,49 +565,6 @@ async fn send_response(
 // ===============================================
 // End server helpers
 // ===============================================
-
-/// Main server run function
-pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> {
-    set_file_descriptor_limits();
-
-    // Get the address to bind to
-    let addr = format!("{}:{}", host.into(), port);
-    log::info!("Starting bonka server on {}", &addr);
-
-    // Initialize server state
-    let state = init_server_state();
-
-    // Start session cleanup task
-    tokio::spawn(run_session_cleanup(state.clone()));
-
-    // Create and configure the listener
-    let listener = create_listener(&addr).await?;
-    log::info!("Server listening on {}", addr);
-
-    // Create a semaphore to limit max concurrent connections
-    let max_connections = get_max_connections();
-    let connection_limiter = Arc::new(Semaphore::new(max_connections));
-    log::info!(
-        "Server configured with maximum of {} concurrent connections",
-        max_connections
-    );
-
-    // Backoff parameters
-    let base_delay = Duration::from_millis(50);
-    let max_delay = Duration::from_secs(5);
-    let mut current_delay = base_delay;
-
-    // Main connection acceptance loop
-    run_connection_loop(
-        listener,
-        state,
-        connection_limiter,
-        &mut current_delay,
-        base_delay,
-        max_delay,
-    )
-    .await
-}
 
 #[cfg(test)]
 mod tests {
