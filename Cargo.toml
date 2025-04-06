@@ -75,7 +75,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 
 # Release configuration
 [profile.release]
-# strip = true
+# strip = tru
 opt-level = "z"
 debug = true
 lto = true
