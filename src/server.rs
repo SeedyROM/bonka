@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use color_eyre::eyre::{self, Report};
+use color_eyre::eyre;
 use futures::{SinkExt, StreamExt};
 use prost::Message;
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,50 @@ use crate::log;
 use crate::proto::{CommandType, Request, Response, ResultType};
 use crate::session::SessionManager;
 
+/// Error type for the server
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    #[error("Server failed to set max FD limits: {0}")]
+    MaxFdLimits(#[source] eyre::Report),
+    #[error("Socket bind error: {0}")]
+    SocketBind(#[source] std::io::Error),
+    #[error("Socket configuration error: {0}")]
+    SocketConfig(#[source] std::io::Error),
+    #[error("Failed to acquire semaphore permit: {0}")]
+    SemaphoreAcquire(#[source] tokio::sync::AcquireError),
+    #[error("Failed to connect to server: {0}")]
+    Connection(#[source] std::io::Error),
+    #[error("Failed to send response: {0}")]
+    SendResponse(#[source] std::io::Error),
+    #[error("Failed to lock server state")]
+    LockingState,
+}
+
+/// Extension trait for socket configuration
+trait SocketConfigExt {
+    fn configure<F, T>(&self, f: F) -> Result<T, ServerError>
+    where
+        F: FnOnce(&Self) -> std::io::Result<T>;
+}
+
+impl SocketConfigExt for socket2::Socket {
+    fn configure<F, T>(&self, f: F) -> Result<T, ServerError>
+    where
+        F: FnOnce(&Self) -> std::io::Result<T>,
+    {
+        f(self).map_err(ServerError::SocketBind)
+    }
+}
+
+impl SocketConfigExt for TcpStream {
+    fn configure<F, T>(&self, f: F) -> Result<T, ServerError>
+    where
+        F: FnOnce(&Self) -> std::io::Result<T>,
+    {
+        f(self).map_err(ServerError::SocketBind)
+    }
+}
+
 struct ServerState {
     session_manager: SessionManager,
     kv_store: KeyValueStore,
@@ -22,7 +66,7 @@ struct ServerState {
 fn get_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("Failed to get system time, RIP")
         .as_secs()
 }
 
@@ -127,7 +171,7 @@ fn handle_list_command(request: &Request, kv_store: &KeyValueStore) -> Response 
 // End response helpers
 // ===============================================
 
-fn set_file_descriptor_limits() -> Result<(), Box<dyn std::error::Error>> {
+fn set_file_descriptor_limits() {
     // Try to get the current limits
     let mut rlimit = libc::rlimit {
         rlim_cur: 0,
@@ -169,13 +213,11 @@ fn set_file_descriptor_limits() -> Result<(), Box<dyn std::error::Error>> {
             std::io::Error::last_os_error()
         );
     }
-
-    Ok(())
 }
 
 /// Run the server
-pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
-    set_file_descriptor_limits().ok();
+pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> {
+    set_file_descriptor_limits();
 
     // Get the address to bind to
     let addr = format!("{}:{}", host.into(), port);
@@ -190,36 +232,51 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
     }));
 
     // Start session cleanup task
-    let cleanup_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        interval.tick().await;
-        loop {
+    tokio::spawn({
+        let cleanup_state = Arc::clone(&state); // Clone the Arc
+
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
             interval.tick().await;
-            let mut state = cleanup_state.lock().unwrap();
-            state
-                .session_manager
-                .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
-            log::debug!(
-                "Cleaned up inactive sessions. Current count: {}",
-                state.session_manager.session_count()
-            );
+
+            loop {
+                interval.tick().await;
+
+                match cleanup_state.lock() {
+                    Ok(mut state) => {
+                        state
+                            .session_manager
+                            .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
+
+                        log::debug!(
+                            "Cleaned up inactive sessions. Current count: {}",
+                            state.session_manager.session_count()
+                        );
+                    }
+                    Err(_) => {
+                        log::error!("Failed to acquire lock for session cleanup: poisoned lock");
+                    }
+                }
+            }
         }
     });
 
-    // Start the TCP server
-    let listener = TcpListener::bind(&addr).await.map_err(eyre::Report::from)?;
+    // Create the listener
+    let listener = TcpListener::bind(&addr)
+        .await
+        .map_err(ServerError::SocketBind)?;
 
-    let socket = socket2::Socket::from(listener.into_std()?);
-    socket.set_nonblocking(true)?;
-    socket.set_reuse_address(true)?;
-    socket.set_reuse_port(true)?;
-    socket.set_keepalive(true)?;
-    socket.set_send_buffer_size(1024 * 1024)?;
-    socket.set_recv_buffer_size(1024 * 1024)?;
+    // Configure the socket with more specific options
+    let socket = socket2::Socket::from(listener.into_std().map_err(ServerError::SocketBind)?);
+    socket.configure(|s| s.set_nonblocking(true))?;
+    socket.configure(|s| s.set_reuse_address(true))?;
+    socket.configure(|s| s.set_reuse_port(true))?;
+    socket.configure(|s| s.set_keepalive(true))?;
+    socket.configure(|s| s.set_send_buffer_size(1024 * 1024))?;
+    socket.configure(|s| s.set_recv_buffer_size(1024 * 1024))?;
 
-    let listener = TcpListener::from_std(socket.into())?;
-
+    // Transform the socket back into a TcpListener
+    let listener = TcpListener::from_std(socket.into()).map_err(ServerError::SocketBind)?;
     log::info!("Server listening on {}", addr);
 
     // Create a semaphore to limit max concurrent connections
@@ -239,12 +296,11 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
                 1000 // Default fallback
             }
         });
-
+    let connection_limiter = Arc::new(Semaphore::new(max_connections));
     log::info!(
         "Server configured with maximum of {} concurrent connections",
         max_connections
     );
-    let connection_limiter = Arc::new(Semaphore::new(max_connections));
 
     // Backoff parameters
     let base_delay = Duration::from_millis(50);
@@ -253,7 +309,11 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
 
     loop {
         // Acquire a permit from the semaphore before accepting a new connection
-        let permit = connection_limiter.clone().acquire_owned().await?;
+        let permit = connection_limiter
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(ServerError::SemaphoreAcquire)?;
 
         match listener.accept().await {
             Ok((stream, addr)) => {
@@ -303,13 +363,13 @@ async fn handle_client(
     stream: TcpStream,
     addr: String,
     state: Arc<Mutex<ServerState>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ServerError> {
     // Set socket options for better performance
-    stream.set_nodelay(true)?;
+    stream.configure(|s| s.set_nodelay(true))?;
 
     // Create a session for this client
     let session_id = {
-        let mut server_state = state.lock().unwrap();
+        let mut server_state = state.lock().map_err(|_| ServerError::LockingState)?;
         let session = server_state.session_manager.create_session(addr.clone());
         session.id
     };
@@ -349,12 +409,12 @@ async fn handle_client(
 
                 // Update session activity
                 {
-                    let mut server_state = state.lock().unwrap();
+                    let mut server_state = state.lock().map_err(|_| ServerError::LockingState)?;
                     server_state.session_manager.touch_session(session_id);
                 }
 
                 // Process the command
-                let response = process_command(request, &state).await;
+                let response = process_command(request, &state).await?;
 
                 // Send response
                 send_response(&mut framed, &response).await?;
@@ -374,7 +434,7 @@ async fn handle_client(
 
     // Clean up session
     {
-        let mut server_state = state.lock().unwrap();
+        let mut server_state = state.lock().map_err(|_| ServerError::LockingState)?;
         log::info!(
             "Removing session {} for client {}",
             base62::encode(session_id),
@@ -390,18 +450,23 @@ async fn handle_client(
 /// Process a command and return a response
 ///
 /// This function processes a command from a client request and returns a response.
-async fn process_command(request: Request, state: &Arc<Mutex<ServerState>>) -> Response {
-    let server_state = state.lock().unwrap();
+async fn process_command(
+    request: Request,
+    state: &Arc<Mutex<ServerState>>,
+) -> Result<Response, ServerError> {
+    let server_state = state.lock().map_err(|_| ServerError::LockingState)?;
     let kv_store = &server_state.kv_store;
 
-    match request.command_type() {
+    let result = match request.command_type() {
         CommandType::CommandGet => handle_get_command(&request, kv_store),
         CommandType::CommandSet => handle_set_command(&request, kv_store),
         CommandType::CommandDelete => handle_delete_command(&request, kv_store),
         CommandType::CommandList => handle_list_command(&request, kv_store),
         CommandType::CommandExit => create_exit_response(request.id),
         _ => create_error_response(request.id, "Unknown command".to_string()),
-    }
+    };
+
+    Ok(result)
 }
 
 /// Send a response to the client
@@ -410,11 +475,14 @@ async fn process_command(request: Request, state: &Arc<Mutex<ServerState>>) -> R
 async fn send_response(
     framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
     response: &Response,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ServerError> {
     // Serialize response using protobuf
     let encoded = response.encode_to_vec();
     // Send the response
-    framed.send(Bytes::from(encoded)).await?;
+    framed
+        .send(Bytes::from(encoded))
+        .await
+        .map_err(ServerError::SendResponse)?;
     Ok(())
 }
 

@@ -75,9 +75,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 
 # Release configuration
 [profile.release]
-# strip = tru
+# NOTE (SeedyROM): Add strip option when not profiling
+strip = true
 opt-level = "z"
-debug = true
+# NOTE (SeedyROM): Deactivate debug symbols option when not profiling
+debug = false
 lto = true
 codegen-units = 1
 panic = "abort"
