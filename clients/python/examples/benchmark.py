@@ -16,7 +16,6 @@ import signal
 # Optional imports - will show warning if not available
 try:
     import matplotlib.pyplot as plt
-    import numpy as np
 
     PLOTTING_AVAILABLE = True
 except ImportError:
@@ -1127,7 +1126,11 @@ def parse_arguments():
     )
 
     # Output options
-    parser.add_argument("--output", help="Output file for detailed results (JSON)")
+    parser.add_argument(
+        "--output",
+        default="benchmarks/bonka",
+        help="Output file for detailed results (JSON)",
+    )
     parser.add_argument(
         "--plots", action="store_true", help="Generate performance plots"
     )
