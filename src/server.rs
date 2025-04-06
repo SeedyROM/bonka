@@ -175,6 +175,7 @@ fn handle_list_command(request: &Request, kv_store: &KeyValueStore) -> Response 
 // Server helpers
 // ===============================================
 
+#[inline(always)]
 fn set_file_descriptor_limits() {
     // Try to get the current limits
     let mut rlimit = libc::rlimit {
@@ -219,6 +220,7 @@ fn set_file_descriptor_limits() {
     }
 }
 
+#[inline(always)]
 fn get_max_connections() -> usize {
     // Get the max connections from the environment variable or use a default
     std::env::var("BONKA_CONNECTION_LIMIT")
@@ -239,6 +241,7 @@ fn get_max_connections() -> usize {
         })
 }
 
+#[inline(always)]
 async fn acquire_permit(
     semaphore: &Arc<Semaphore>,
 ) -> Result<tokio::sync::OwnedSemaphorePermit, ServerError> {
@@ -249,6 +252,7 @@ async fn acquire_permit(
         .map_err(ServerError::SemaphoreAcquire)
 }
 
+#[inline(always)]
 async fn apply_backoff_delay(current_delay: &mut Duration, max_delay: Duration) {
     let jitter_factor = rand::random::<f32>() * 0.5 + 0.75; // Random float between 0.75 and 1.25
     let jittered_delay =
@@ -264,6 +268,7 @@ async fn apply_backoff_delay(current_delay: &mut Duration, max_delay: Duration) 
     *current_delay = std::cmp::min(*current_delay * 2, max_delay);
 }
 
+#[inline(always)]
 async fn run_session_cleanup(state: Arc<Mutex<ServerState>>) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     interval.tick().await;
@@ -289,6 +294,7 @@ async fn run_session_cleanup(state: Arc<Mutex<ServerState>>) {
     }
 }
 
+#[inline(always)]
 fn configure_socket(socket: &socket2::Socket) -> Result<(), ServerError> {
     socket.configure(|s| s.set_nonblocking(true))?;
     socket.configure(|s| s.set_reuse_address(true))?;
@@ -300,6 +306,7 @@ fn configure_socket(socket: &socket2::Socket) -> Result<(), ServerError> {
 }
 
 /// Create and configure the TCP listener
+#[inline(always)]
 async fn create_listener(addr: &str) -> Result<TcpListener, ServerError> {
     let listener = TcpListener::bind(addr)
         .await
@@ -314,6 +321,7 @@ async fn create_listener(addr: &str) -> Result<TcpListener, ServerError> {
 }
 
 /// Initialize server state
+#[inline(always)]
 fn init_server_state() -> Arc<Mutex<ServerState>> {
     Arc::new(Mutex::new(ServerState {
         session_manager: SessionManager::new(),
@@ -322,6 +330,7 @@ fn init_server_state() -> Arc<Mutex<ServerState>> {
 }
 
 /// Main server connection loop
+#[inline(always)]
 async fn run_connection_loop(
     listener: TcpListener,
     state: Arc<Mutex<ServerState>>,
@@ -365,6 +374,7 @@ async fn run_connection_loop(
 /// Handle a client connection
 ///
 /// This function processes a client connection, handling requests and sending responses.
+#[inline(always)]
 async fn handle_client(
     stream: TcpStream,
     addr: String,
