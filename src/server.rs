@@ -171,6 +171,10 @@ fn handle_list_command(request: &Request, kv_store: &KeyValueStore) -> Response 
 // End response helpers
 // ===============================================
 
+// ===============================================
+// Server helpers
+// ===============================================
+
 fn set_file_descriptor_limits() {
     // Try to get the current limits
     let mut rlimit = libc::rlimit {
@@ -215,72 +219,9 @@ fn set_file_descriptor_limits() {
     }
 }
 
-/// Run the server
-pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> {
-    set_file_descriptor_limits();
-
-    // Get the address to bind to
-    let addr = format!("{}:{}", host.into(), port);
-
-    // Log server start
-    log::info!("Starting bonka server on {}", &addr);
-
-    // Initialize server state
-    let state = Arc::new(Mutex::new(ServerState {
-        session_manager: SessionManager::new(),
-        kv_store: KeyValueStore::new(),
-    }));
-
-    // Start session cleanup task
-    tokio::spawn({
-        let cleanup_state = Arc::clone(&state); // Clone the Arc
-
-        async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-
-                match cleanup_state.lock() {
-                    Ok(mut state) => {
-                        state
-                            .session_manager
-                            .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
-
-                        log::debug!(
-                            "Cleaned up inactive sessions. Current count: {}",
-                            state.session_manager.session_count()
-                        );
-                    }
-                    Err(_) => {
-                        log::error!("Failed to acquire lock for session cleanup: poisoned lock");
-                    }
-                }
-            }
-        }
-    });
-
-    // Create the listener
-    let listener = TcpListener::bind(&addr)
-        .await
-        .map_err(ServerError::SocketBind)?;
-
-    // Configure the socket with more specific options
-    let socket = socket2::Socket::from(listener.into_std().map_err(ServerError::SocketBind)?);
-    socket.configure(|s| s.set_nonblocking(true))?;
-    socket.configure(|s| s.set_reuse_address(true))?;
-    socket.configure(|s| s.set_reuse_port(true))?;
-    socket.configure(|s| s.set_keepalive(true))?;
-    socket.configure(|s| s.set_send_buffer_size(1024 * 1024))?;
-    socket.configure(|s| s.set_recv_buffer_size(1024 * 1024))?;
-
-    // Transform the socket back into a TcpListener
-    let listener = TcpListener::from_std(socket.into()).map_err(ServerError::SocketBind)?;
-    log::info!("Server listening on {}", addr);
-
-    // Create a semaphore to limit max concurrent connections
-    let max_connections = std::env::var("BONKA_CONNECTION_LIMIT")
+fn get_max_connections() -> usize {
+    // Get the max connections from the environment variable or use a default
+    std::env::var("BONKA_CONNECTION_LIMIT")
         .ok()
         .and_then(|limit| limit.parse::<usize>().ok())
         .unwrap_or_else(|| {
@@ -295,25 +236,103 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> 
             } else {
                 1000 // Default fallback
             }
-        });
-    let connection_limiter = Arc::new(Semaphore::new(max_connections));
-    log::info!(
-        "Server configured with maximum of {} concurrent connections",
-        max_connections
-    );
+        })
+}
 
-    // Backoff parameters
-    let base_delay = Duration::from_millis(50);
-    let max_delay = Duration::from_secs(5);
-    let mut current_delay = base_delay;
+async fn acquire_permit(
+    semaphore: &Arc<Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ServerError> {
+    semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(ServerError::SemaphoreAcquire)
+}
+
+async fn apply_backoff_delay(current_delay: &mut Duration, max_delay: Duration) {
+    let jitter_factor = rand::random::<f32>() * 0.5 + 0.75; // Random float between 0.75 and 1.25
+    let jittered_delay =
+        Duration::from_millis((current_delay.as_millis() as f32 * jitter_factor) as u64);
+
+    log::debug!(
+        "Backing off for {}ms before next accept attempt",
+        jittered_delay.as_millis()
+    );
+    tokio::time::sleep(jittered_delay).await;
+
+    // Increase backoff delay for next failure (exponential)
+    *current_delay = std::cmp::min(*current_delay * 2, max_delay);
+}
+
+async fn run_session_cleanup(state: Arc<Mutex<ServerState>>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    interval.tick().await;
 
     loop {
+        interval.tick().await;
+
+        match state.lock() {
+            Ok(mut state) => {
+                state
+                    .session_manager
+                    .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
+
+                log::debug!(
+                    "Cleaned up inactive sessions. Current count: {}",
+                    state.session_manager.session_count()
+                );
+            }
+            Err(_) => {
+                log::error!("Failed to acquire lock for session cleanup: poisoned lock");
+            }
+        }
+    }
+}
+
+fn configure_socket(socket: &socket2::Socket) -> Result<(), ServerError> {
+    socket.configure(|s| s.set_nonblocking(true))?;
+    socket.configure(|s| s.set_reuse_address(true))?;
+    socket.configure(|s| s.set_reuse_port(true))?;
+    socket.configure(|s| s.set_keepalive(true))?;
+    socket.configure(|s| s.set_send_buffer_size(1024 * 1024))?;
+    socket.configure(|s| s.set_recv_buffer_size(1024 * 1024))?;
+    Ok(())
+}
+
+/// Create and configure the TCP listener
+async fn create_listener(addr: &str) -> Result<TcpListener, ServerError> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(ServerError::SocketBind)?;
+
+    // Configure the socket with more specific options
+    let socket = socket2::Socket::from(listener.into_std().map_err(ServerError::SocketBind)?);
+    configure_socket(&socket)?;
+
+    // Transform the socket back into a TcpListener
+    TcpListener::from_std(socket.into()).map_err(ServerError::SocketBind)
+}
+
+/// Initialize server state
+fn init_server_state() -> Arc<Mutex<ServerState>> {
+    Arc::new(Mutex::new(ServerState {
+        session_manager: SessionManager::new(),
+        kv_store: KeyValueStore::new(),
+    }))
+}
+
+/// Main server connection loop
+async fn run_connection_loop(
+    listener: TcpListener,
+    state: Arc<Mutex<ServerState>>,
+    connection_limiter: Arc<Semaphore>,
+    current_delay: &mut Duration,
+    base_delay: Duration,
+    max_delay: Duration,
+) -> Result<(), ServerError> {
+    loop {
         // Acquire a permit from the semaphore before accepting a new connection
-        let permit = connection_limiter
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(ServerError::SemaphoreAcquire)?;
+        let permit = acquire_permit(&connection_limiter).await?;
 
         match listener.accept().await {
             Ok((stream, addr)) => {
@@ -321,7 +340,7 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> 
                 let client_state = Arc::clone(&state);
 
                 // Reset backoff delay on successful connection
-                current_delay = base_delay;
+                *current_delay = base_delay;
 
                 // Handle each client in a separate task
                 tokio::spawn(async move {
@@ -334,23 +353,10 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> 
                 });
             }
             Err(e) => {
+                // Drop the permit and apply backoff delay
                 log::error!("Failed to accept connection: {}", e);
-                drop(permit); // Release the permit on error
-
-                // Apply exponential backoff with jitter
-                let jitter_factor = rand::random::<f32>() * 0.5 + 0.75; // Random float between 0.75 and 1.25
-                let jittered_delay = Duration::from_millis(
-                    (current_delay.as_millis() as f32 * jitter_factor) as u64,
-                );
-
-                log::debug!(
-                    "Backing off for {}ms before next accept attempt",
-                    jittered_delay.as_millis()
-                );
-                tokio::time::sleep(jittered_delay).await;
-
-                // Increase backoff delay for next failure (exponential)
-                current_delay = std::cmp::min(current_delay * 2, max_delay);
+                drop(permit);
+                apply_backoff_delay(current_delay, max_delay).await;
             }
         }
     }
@@ -484,6 +490,53 @@ async fn send_response(
         .await
         .map_err(ServerError::SendResponse)?;
     Ok(())
+}
+
+// ===============================================
+// End server helpers
+// ===============================================
+
+/// Main server run function
+pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> {
+    set_file_descriptor_limits();
+
+    // Get the address to bind to
+    let addr = format!("{}:{}", host.into(), port);
+    log::info!("Starting bonka server on {}", &addr);
+
+    // Initialize server state
+    let state = init_server_state();
+
+    // Start session cleanup task
+    tokio::spawn(run_session_cleanup(state.clone()));
+
+    // Create and configure the listener
+    let listener = create_listener(&addr).await?;
+    log::info!("Server listening on {}", addr);
+
+    // Create a semaphore to limit max concurrent connections
+    let max_connections = get_max_connections();
+    let connection_limiter = Arc::new(Semaphore::new(max_connections));
+    log::info!(
+        "Server configured with maximum of {} concurrent connections",
+        max_connections
+    );
+
+    // Backoff parameters
+    let base_delay = Duration::from_millis(50);
+    let max_delay = Duration::from_secs(5);
+    let mut current_delay = base_delay;
+
+    // Main connection acceptance loop
+    run_connection_loop(
+        listener,
+        state,
+        connection_limiter,
+        &mut current_delay,
+        base_delay,
+        max_delay,
+    )
+    .await
 }
 
 #[cfg(test)]
