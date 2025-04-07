@@ -35,8 +35,11 @@ pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> 
     // Initialize server state
     let state = init_server_state();
 
+    // Clone state for the session cleanup task
+    let cleanup_state = state.clone();
+
     // Start session cleanup task
-    tokio::spawn(run_session_cleanup(state.clone()));
+    tokio::spawn(run_session_cleanup(cleanup_state));
 
     // Create and configure the listener
     let listener = create_listener(&addr).await?;
@@ -111,9 +114,11 @@ impl SocketConfigExt for TcpStream {
     }
 }
 
+/// Improved server state structure
+#[derive(Clone)]
 struct ServerState {
-    session_manager: SessionManager,
-    kv_store: KeyValueStore,
+    session_manager: Arc<Mutex<SessionManager>>,
+    kv_store: Arc<KeyValueStore>, // No mutex needed since KeyValueStore uses DashMap
 }
 
 // ===============================================
@@ -327,22 +332,21 @@ async fn apply_backoff_delay(current_delay: &mut Duration, max_delay: Duration) 
 }
 
 #[inline(always)]
-async fn run_session_cleanup(state: Arc<Mutex<ServerState>>) {
+async fn run_session_cleanup(state: ServerState) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     interval.tick().await;
 
     loop {
         interval.tick().await;
 
-        match state.lock() {
-            Ok(mut state) => {
-                state
-                    .session_manager
-                    .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
+        // Only lock the session manager component
+        match state.session_manager.lock() {
+            Ok(mut session_manager) => {
+                session_manager.cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
 
                 log::debug!(
                     "Cleaned up inactive sessions. Current count: {}",
-                    state.session_manager.session_count()
+                    session_manager.session_count()
                 );
             }
             Err(_) => {
@@ -380,18 +384,18 @@ async fn create_listener(addr: &str) -> Result<TcpListener, ServerError> {
 
 /// Initialize server state
 #[inline(always)]
-fn init_server_state() -> Arc<Mutex<ServerState>> {
-    Arc::new(Mutex::new(ServerState {
-        session_manager: SessionManager::new(),
-        kv_store: KeyValueStore::new(),
-    }))
+fn init_server_state() -> ServerState {
+    ServerState {
+        session_manager: Arc::new(Mutex::new(SessionManager::new())),
+        kv_store: Arc::new(KeyValueStore::new()),
+    }
 }
 
 /// Main server connection loop
 #[inline(always)]
 async fn run_connection_loop(
     listener: TcpListener,
-    state: Arc<Mutex<ServerState>>,
+    state: ServerState,
     connection_limiter: Arc<Semaphore>,
     current_delay: &mut Duration,
     base_delay: Duration,
@@ -404,7 +408,8 @@ async fn run_connection_loop(
         match listener.accept().await {
             Ok((stream, addr)) => {
                 log::info!("New connection from: {}", addr);
-                let client_state = Arc::clone(&state);
+                // Clone the ServerState for the new client task
+                let client_state = state.clone();
 
                 // Reset backoff delay on successful connection
                 *current_delay = base_delay;
@@ -436,15 +441,18 @@ async fn run_connection_loop(
 async fn handle_client(
     stream: TcpStream,
     addr: String,
-    state: Arc<Mutex<ServerState>>,
+    state: ServerState,
 ) -> Result<(), ServerError> {
     // Set socket options for better performance
     stream.configure(|s| s.set_nodelay(true))?;
 
     // Create a session for this client
     let session_id = {
-        let mut server_state = state.lock().map_err(|_| ServerError::LockingState)?;
-        let session = server_state.session_manager.create_session(addr.clone());
+        let mut session_manager = state
+            .session_manager
+            .lock()
+            .map_err(|_| ServerError::LockingState)?;
+        let session = session_manager.create_session(addr.clone());
         session.id
     };
 
@@ -461,7 +469,7 @@ async fn handle_client(
     while let Some(result) = framed.next().await {
         match result {
             Ok(bytes) => {
-                // Deserialize request using MessagePack
+                // Deserialize request
                 let request: Request = match Request::decode(bytes.as_ref()) {
                     Ok(req) => req,
                     Err(e) => {
@@ -481,13 +489,16 @@ async fn handle_client(
                     }
                 };
 
-                // Update session activity
+                // Update session activity - only lock the session manager
                 {
-                    let mut server_state = state.lock().map_err(|_| ServerError::LockingState)?;
-                    server_state.session_manager.touch_session(session_id);
+                    let mut session_manager = state
+                        .session_manager
+                        .lock()
+                        .map_err(|_| ServerError::LockingState)?;
+                    session_manager.touch_session(session_id);
                 }
 
-                // Process the command
+                // Process the command - no need to lock the whole state
                 let response = process_command(request, &state).await?;
 
                 // Send response
@@ -506,15 +517,18 @@ async fn handle_client(
         }
     }
 
-    // Clean up session
+    // Clean up session - only lock the session manager
     {
-        let mut server_state = state.lock().map_err(|_| ServerError::LockingState)?;
+        let mut session_manager = state
+            .session_manager
+            .lock()
+            .map_err(|_| ServerError::LockingState)?;
         log::info!(
             "Removing session {} for client {}",
             base62::encode(session_id),
             addr
         );
-        server_state.session_manager.remove_session(session_id);
+        session_manager.remove_session(session_id);
     }
 
     log::info!("Connection closed for client {}", addr);
@@ -525,12 +539,9 @@ async fn handle_client(
 ///
 /// This function processes a command from a client request and returns a response.
 #[inline(always)]
-async fn process_command(
-    request: Request,
-    state: &Arc<Mutex<ServerState>>,
-) -> Result<Response, ServerError> {
-    let server_state = state.lock().map_err(|_| ServerError::LockingState)?;
-    let kv_store = &server_state.kv_store;
+async fn process_command(request: Request, state: &ServerState) -> Result<Response, ServerError> {
+    // Direct access to KV store without locking the entire state
+    let kv_store = &state.kv_store;
 
     let result = match request.command_type() {
         CommandType::CommandGet => handle_get_command(&request, kv_store),
