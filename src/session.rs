@@ -1,15 +1,11 @@
-use std::{collections::HashMap, time::Instant};
-
+use dashmap::DashMap;
 use rand::{TryRngCore, rngs::OsRng};
 use sha3::{Digest, Sha3_256};
+use std::time::Instant;
 
 use crate::{constants::DEFAULT_APP_SECRET, log};
 
 /// Session ID is a unique identifier for each session.
-/// It is generated based on the session's origin and a secret application key.
-/// The ID is a 64-bit unsigned integer (u64) derived from the hash of the session's origin
-/// and the application secret. This ensures that each session has a unique ID even if
-/// multiple sessions are created with the same origin.
 pub type Id = u64;
 
 /// Session struct represents a user session.
@@ -19,7 +15,6 @@ pub struct Session {
     /// Timestamp of when the session started.
     pub start_time: Instant,
     /// Timestamp of the last activity in the session.
-    /// This is updated whenever there is an interaction with the session.
     pub last_activity: Instant,
     /// Origin of the session, typically a URL or identifier for the client.
     pub origin: String,
@@ -27,7 +22,6 @@ pub struct Session {
 
 impl Session {
     /// Creates a new session with the given origin and an optional custom seed.
-    /// The custom seed can be used to ensure reproducibility of the session ID.
     pub fn new(origin: impl Into<String>, custom_seed: Option<&[u8]>) -> Self {
         let origin = origin.into();
 
@@ -64,8 +58,7 @@ impl Session {
         }
     }
 
-    /// Creates a new session with the given origin.
-    /// This uses the default application secret for ID generation.
+    /// Creates a new session with the given origin using default application secret.
     pub fn new_default(origin: impl Into<String>) -> Self {
         Self::new(origin, None)
     }
@@ -77,8 +70,8 @@ impl Session {
 }
 
 pub struct SessionManager {
-    sessions: HashMap<Id, Session>,
-    origin_to_sessions: HashMap<String, Vec<Id>>,
+    sessions: DashMap<Id, Session>,
+    origin_to_sessions: DashMap<String, Vec<Id>>,
 }
 
 impl Default for SessionManager {
@@ -90,12 +83,12 @@ impl Default for SessionManager {
 impl SessionManager {
     pub fn new() -> Self {
         SessionManager {
-            sessions: HashMap::new(),
-            origin_to_sessions: HashMap::new(),
+            sessions: DashMap::new(),
+            origin_to_sessions: DashMap::new(),
         }
     }
 
-    pub fn create_session(&mut self, origin: impl Into<String>) -> &Session {
+    pub fn create_session(&self, origin: impl Into<String>) -> Session {
         let origin_str = origin.into();
         // Generate random bytes to ensure uniqueness
         let mut random_bytes = [0u8; 16];
@@ -107,7 +100,7 @@ impl SessionManager {
         let id = session.id;
 
         // Store the session
-        self.sessions.insert(id, session);
+        self.sessions.insert(id, session.clone());
 
         // Update the origin-to-sessions mapping
         self.origin_to_sessions
@@ -115,24 +108,30 @@ impl SessionManager {
             .or_default()
             .push(id);
 
-        self.sessions.get(&id).unwrap()
+        session
     }
 
     // Get all sessions for a specific origin
-    pub fn get_sessions_by_origin(&self, origin: &str) -> Vec<&Session> {
-        match self.origin_to_sessions.get(origin) {
-            Some(ids) => ids.iter().filter_map(|id| self.sessions.get(id)).collect(),
-            None => Vec::new(),
+    pub fn get_sessions_by_origin(&self, origin: &str) -> Vec<Session> {
+        if let Some(ids) = self.origin_to_sessions.get(origin) {
+            ids.iter()
+                .filter_map(|id| self.sessions.get(id).map(|session| session.clone()))
+                .collect()
+        } else {
+            Vec::new()
         }
     }
 
-    // We also need to update the remove function to clean up the origin mapping
-    pub fn remove_session(&mut self, id: Id) -> bool {
+    // Remove a session and update origin mapping
+    pub fn remove_session(&self, id: Id) -> bool {
         if let Some(session) = self.sessions.remove(&id) {
-            if let Some(ids) = self.origin_to_sessions.get_mut(&session.origin) {
+            // Update the origin mapping
+            if let Some(mut ids) = self.origin_to_sessions.get_mut(&session.1.origin) {
                 ids.retain(|&sid| sid != id);
                 if ids.is_empty() {
-                    self.origin_to_sessions.remove(&session.origin);
+                    // Need to drop the reference before removing
+                    drop(ids);
+                    self.origin_to_sessions.remove(&session.1.origin);
                 }
             }
             true
@@ -141,27 +140,22 @@ impl SessionManager {
         }
     }
 
-    /// Creates a new session with the given origin and custom seed, and adds it to the manager
-    pub fn create_session_with_seed(&mut self, origin: impl Into<String>, seed: &[u8]) -> &Session {
-        let session = Session::new(origin, Some(seed));
+    /// Creates a new session with the given origin and custom seed
+    pub fn create_session_with_seed(&self, origin: impl Into<String>, seed: &[u8]) -> Session {
+        let session = Session::new(origin.into(), Some(seed));
         let id = session.id;
-        self.sessions.insert(id, session);
-        self.sessions.get(&id).unwrap()
+        self.sessions.insert(id, session.clone());
+        session
     }
 
     /// Gets a reference to a session by its ID
-    pub fn get_session(&self, id: Id) -> Option<&Session> {
-        self.sessions.get(&id)
-    }
-
-    /// Gets a mutable reference to a session by its ID
-    pub fn get_session_mut(&mut self, id: Id) -> Option<&mut Session> {
-        self.sessions.get_mut(&id)
+    pub fn get_session(&self, id: Id) -> Option<Session> {
+        self.sessions.get(&id).map(|session| session.clone())
     }
 
     /// Updates the last activity timestamp of a session
-    pub fn touch_session(&mut self, id: Id) -> bool {
-        if let Some(session) = self.sessions.get_mut(&id) {
+    pub fn touch_session(&self, id: Id) -> bool {
+        if let Some(mut session) = self.sessions.get_mut(&id) {
             session.touch();
             true
         } else {
@@ -170,13 +164,17 @@ impl SessionManager {
     }
 
     /// Gets all sessions
-    pub fn get_all_sessions(&self) -> impl Iterator<Item = &Session> {
-        self.sessions.values()
+    pub fn get_all_sessions(&self) -> Vec<Session> {
+        self.sessions
+            .iter()
+            .map(|session| session.clone())
+            .collect()
     }
 
     /// Removes all sessions
-    pub fn clear_sessions(&mut self) {
+    pub fn clear_sessions(&self) {
         self.sessions.clear();
+        self.origin_to_sessions.clear();
     }
 
     /// Gets the number of active sessions
@@ -185,18 +183,40 @@ impl SessionManager {
     }
 
     /// Finds sessions by origin
-    pub fn find_sessions_by_origin(&self, origin: &str) -> Vec<&Session> {
+    pub fn find_sessions_by_origin(&self, origin: &str) -> Vec<Session> {
         self.sessions
-            .values()
+            .iter()
             .filter(|session| session.origin == origin)
+            .map(|session| session.clone())
             .collect()
     }
 
     /// Removes sessions that have been inactive for longer than the given duration
-    pub fn cleanup_inactive_sessions(&mut self, timeout: std::time::Duration) {
+    pub fn cleanup_inactive_sessions(&self, timeout: std::time::Duration) {
         let now = Instant::now();
-        self.sessions
-            .retain(|_, session| now.duration_since(session.last_activity) < timeout);
+        let ids_to_remove: Vec<Id> = self
+            .sessions
+            .iter()
+            .filter(|session| now.duration_since(session.last_activity) >= timeout)
+            .map(|session| session.id)
+            .collect();
+
+        // Remove the inactive sessions
+        for id in ids_to_remove {
+            self.remove_session(id);
+        }
+    }
+}
+
+// Need to implement Clone for Session to work with DashMap
+impl Clone for Session {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            start_time: self.start_time,
+            last_activity: self.last_activity,
+            origin: self.origin.clone(),
+        }
     }
 }
 
@@ -209,7 +229,7 @@ mod tests {
 
     #[test]
     fn create_session() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
         let session = manager.create_session("127.0.0.1:8080");
 
         assert_eq!(session.origin, "127.0.0.1:8080");
@@ -218,7 +238,7 @@ mod tests {
 
     #[test]
     fn multiple_sessions_same_origin() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
 
         // Create two sessions with the same IP:port origin
         let session1 = manager.create_session("192.168.1.1:8080");
@@ -247,7 +267,7 @@ mod tests {
 
     #[test]
     fn get_session() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
         let session = manager.create_session("10.0.0.1:9000");
         let id = session.id;
 
@@ -263,7 +283,7 @@ mod tests {
 
     #[test]
     fn touch_session() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
         let session = manager.create_session("172.16.0.5:4433");
         let id = session.id;
 
@@ -287,7 +307,7 @@ mod tests {
 
     #[test]
     fn remove_session() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
         let session = manager.create_session("192.168.0.1:22");
         let id = session.id;
 
@@ -311,7 +331,7 @@ mod tests {
 
     #[test]
     fn cleanup_inactive_sessions() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
 
         // Create a session
         let session = manager.create_session("10.10.10.10:80");
@@ -335,7 +355,7 @@ mod tests {
 
     #[test]
     fn clear_sessions() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
 
         // Create multiple sessions with different IP:port origins
         manager.create_session("192.168.1.10:5555");
@@ -358,7 +378,7 @@ mod tests {
 
     #[test]
     fn custom_seed() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
 
         // Create two sessions with the same origin but different seeds
         let seed1 = b"seed1";
@@ -383,7 +403,7 @@ mod tests {
 
     #[test]
     fn find_sessions_by_origin() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
 
         // Add several sessions with different origins
         manager.create_session("192.168.1.1:8080");
@@ -410,7 +430,7 @@ mod tests {
 
     #[test]
     fn ipv6_address() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
 
         // Test with IPv6 address format
         let ipv6_origin = "[2001:db8::1]:8080";
@@ -422,10 +442,10 @@ mod tests {
 
     #[test]
     fn get_all_sessions() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
 
         // Initially there should be no sessions
-        assert_eq!(manager.get_all_sessions().count(), 0);
+        assert_eq!(manager.get_all_sessions().len(), 0);
 
         // Add three sessions
         let session1 = manager.create_session("192.168.1.1:8080");
@@ -438,7 +458,7 @@ mod tests {
         let id3 = session3.id;
 
         // Collect all sessions
-        let all_sessions: Vec<_> = manager.get_all_sessions().collect();
+        let all_sessions: Vec<_> = manager.get_all_sessions();
 
         // Verify count
         assert_eq!(all_sessions.len(), 3);
@@ -452,7 +472,7 @@ mod tests {
 
     #[test]
     fn get_session_mut() {
-        let mut manager = SessionManager::new();
+        let manager = SessionManager::new();
 
         // Create a session
         let session = manager.create_session("192.168.1.1:8080");
@@ -460,10 +480,10 @@ mod tests {
 
         // Get a mutable reference and modify the session
         {
-            let session_mut = manager.get_session_mut(id);
+            let session_mut = manager.get_session(id);
             assert!(session_mut.is_some());
 
-            let session_mut = session_mut.unwrap();
+            let mut session_mut = session_mut.unwrap();
             // Store the initial last_activity
             let initial_time = session_mut.last_activity;
 
@@ -475,7 +495,7 @@ mod tests {
         }
 
         // Verify getting a non-existent session returns None
-        assert!(manager.get_session_mut(12345).is_none());
+        assert!(manager.get_session(12345).is_none());
     }
 
     #[test]

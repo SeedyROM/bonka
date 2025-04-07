@@ -2,7 +2,7 @@ use bytes::Bytes;
 use color_eyre::eyre;
 use futures::{SinkExt, StreamExt};
 use prost::Message;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -85,8 +85,6 @@ pub enum ServerError {
     Connection(#[source] std::io::Error),
     #[error("Failed to send response: {0}")]
     SendResponse(#[source] std::io::Error),
-    #[error("Failed to lock server state")]
-    LockingState,
 }
 
 /// Extension trait for socket configuration
@@ -114,11 +112,11 @@ impl SocketConfigExt for TcpStream {
     }
 }
 
-/// Improved server state structure
+/// Improved server state structure using only thread-safe components
 #[derive(Clone)]
 struct ServerState {
-    session_manager: Arc<Mutex<SessionManager>>,
-    kv_store: Arc<KeyValueStore>, // No mutex needed since KeyValueStore uses DashMap
+    session_manager: Arc<SessionManager>, // No Mutex needed with DashMap-based SessionManager
+    kv_store: Arc<KeyValueStore>,         // No Mutex needed since KeyValueStore uses DashMap
 }
 
 // ===============================================
@@ -339,20 +337,15 @@ async fn run_session_cleanup(state: ServerState) {
     loop {
         interval.tick().await;
 
-        // Only lock the session manager component
-        match state.session_manager.lock() {
-            Ok(mut session_manager) => {
-                session_manager.cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
+        // No need to lock - SessionManager with DashMap is already thread-safe
+        state
+            .session_manager
+            .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
 
-                log::debug!(
-                    "Cleaned up inactive sessions. Current count: {}",
-                    session_manager.session_count()
-                );
-            }
-            Err(_) => {
-                log::error!("Failed to acquire lock for session cleanup: poisoned lock");
-            }
-        }
+        log::debug!(
+            "Cleaned up inactive sessions. Current count: {}",
+            state.session_manager.session_count()
+        );
     }
 }
 
@@ -382,11 +375,11 @@ async fn create_listener(addr: &str) -> Result<TcpListener, ServerError> {
     TcpListener::from_std(socket.into()).map_err(ServerError::SocketBind)
 }
 
-/// Initialize server state
+/// Initialize server state with thread-safe components
 #[inline(always)]
 fn init_server_state() -> ServerState {
     ServerState {
-        session_manager: Arc::new(Mutex::new(SessionManager::new())),
+        session_manager: Arc::new(SessionManager::new()),
         kv_store: Arc::new(KeyValueStore::new()),
     }
 }
@@ -446,15 +439,9 @@ async fn handle_client(
     // Set socket options for better performance
     stream.configure(|s| s.set_nodelay(true))?;
 
-    // Create a session for this client
-    let session_id = {
-        let mut session_manager = state
-            .session_manager
-            .lock()
-            .map_err(|_| ServerError::LockingState)?;
-        let session = session_manager.create_session(addr.clone());
-        session.id
-    };
+    // Create a session for this client - no lock needed with DashMap-based SessionManager
+    let session = state.session_manager.create_session(addr.clone());
+    let session_id = session.id;
 
     log::info!(
         "Created session {} for client {}",
@@ -489,16 +476,10 @@ async fn handle_client(
                     }
                 };
 
-                // Update session activity - only lock the session manager
-                {
-                    let mut session_manager = state
-                        .session_manager
-                        .lock()
-                        .map_err(|_| ServerError::LockingState)?;
-                    session_manager.touch_session(session_id);
-                }
+                // Update session activity - no lock needed with DashMap-based SessionManager
+                state.session_manager.touch_session(session_id);
 
-                // Process the command - no need to lock the whole state
+                // Process the command
                 let response = process_command(request, &state).await?;
 
                 // Send response
@@ -517,19 +498,13 @@ async fn handle_client(
         }
     }
 
-    // Clean up session - only lock the session manager
-    {
-        let mut session_manager = state
-            .session_manager
-            .lock()
-            .map_err(|_| ServerError::LockingState)?;
-        log::info!(
-            "Removing session {} for client {}",
-            base62::encode(session_id),
-            addr
-        );
-        session_manager.remove_session(session_id);
-    }
+    // Clean up session - no lock needed with DashMap-based SessionManager
+    log::info!(
+        "Removing session {} for client {}",
+        base62::encode(session_id),
+        addr
+    );
+    state.session_manager.remove_session(session_id);
 
     log::info!("Connection closed for client {}", addr);
     Ok(())
@@ -540,7 +515,7 @@ async fn handle_client(
 /// This function processes a command from a client request and returns a response.
 #[inline(always)]
 async fn process_command(request: Request, state: &ServerState) -> Result<Response, ServerError> {
-    // Direct access to KV store without locking the entire state
+    // Direct access to KV store without locking
     let kv_store = &state.kv_store;
 
     let result = match request.command_type() {
@@ -557,7 +532,7 @@ async fn process_command(request: Request, state: &ServerState) -> Result<Respon
 
 /// Send a response to the client
 ///
-/// This function serializes the response using MessagePack and sends it to the client.
+/// This function serializes the response using protobuf and sends it to the client.
 #[inline(always)]
 async fn send_response(
     framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
