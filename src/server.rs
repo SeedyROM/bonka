@@ -1,10 +1,11 @@
 use bytes::Bytes;
-use color_eyre::eyre::{self, Report};
+use color_eyre::eyre;
 use futures::{SinkExt, StreamExt};
 use prost::Message;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::kv::{self, KeyValueStore};
@@ -12,16 +13,121 @@ use crate::log;
 use crate::proto::{CommandType, Request, Response, ResultType};
 use crate::session::SessionManager;
 
-struct ServerState {
-    session_manager: SessionManager,
-    kv_store: KeyValueStore,
+/// Run the server
+///
+/// This function initializes the server, sets up the listener, and starts accepting connections.
+///
+/// ## Arguments
+///
+/// * `host` - The host address to bind to.
+/// * `port` - The port to bind to.
+///
+/// ## Returns
+///
+/// * `Result<(), ServerError>` - Returns Ok if the server runs successfully, or an error if it fails.
+pub async fn run(host: impl Into<String>, port: u16) -> Result<(), ServerError> {
+    set_file_descriptor_limits();
+
+    // Get the address to bind to
+    let addr = format!("{}:{}", host.into(), port);
+    log::info!("Starting bonka server on {}", &addr);
+
+    // Initialize server state
+    let state = init_server_state();
+
+    // Clone state for the session cleanup task
+    let cleanup_state = state.clone();
+
+    // Start session cleanup task
+    tokio::spawn(run_session_cleanup(cleanup_state));
+
+    // Create and configure the listener
+    let listener = create_listener(&addr).await?;
+    log::info!("Server listening on {}", addr);
+
+    // Create a semaphore to limit max concurrent connections
+    let max_connections = get_max_connections();
+    let connection_limiter = Arc::new(Semaphore::new(max_connections));
+    log::info!(
+        "Server configured with maximum of {} concurrent connections",
+        max_connections
+    );
+
+    // Backoff parameters
+    let base_delay = Duration::from_millis(50);
+    let max_delay = Duration::from_secs(5);
+    let mut current_delay = base_delay;
+
+    // Main connection acceptance loop
+    run_connection_loop(
+        listener,
+        state,
+        connection_limiter,
+        &mut current_delay,
+        base_delay,
+        max_delay,
+    )
+    .await
 }
+
+/// Error type for the server
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    #[error("Server failed to set max FD limits: {0}")]
+    MaxFdLimits(#[source] eyre::Report),
+    #[error("Socket bind error: {0}")]
+    SocketBind(#[source] std::io::Error),
+    #[error("Socket configuration error: {0}")]
+    SocketConfig(#[source] std::io::Error),
+    #[error("Failed to acquire semaphore permit: {0}")]
+    SemaphoreAcquire(#[source] tokio::sync::AcquireError),
+    #[error("Failed to connect to server: {0}")]
+    Connection(#[source] std::io::Error),
+    #[error("Failed to send response: {0}")]
+    SendResponse(#[source] std::io::Error),
+}
+
+/// Extension trait for socket configuration
+trait SocketConfigExt {
+    fn configure<F, T>(&self, f: F) -> Result<T, ServerError>
+    where
+        F: FnOnce(&Self) -> std::io::Result<T>;
+}
+
+impl SocketConfigExt for socket2::Socket {
+    fn configure<F, T>(&self, f: F) -> Result<T, ServerError>
+    where
+        F: FnOnce(&Self) -> std::io::Result<T>,
+    {
+        f(self).map_err(ServerError::SocketBind)
+    }
+}
+
+impl SocketConfigExt for TcpStream {
+    fn configure<F, T>(&self, f: F) -> Result<T, ServerError>
+    where
+        F: FnOnce(&Self) -> std::io::Result<T>,
+    {
+        f(self).map_err(ServerError::SocketBind)
+    }
+}
+
+/// Improved server state structure using only thread-safe components
+#[derive(Clone)]
+struct ServerState {
+    session_manager: Arc<SessionManager>, // No Mutex needed with DashMap-based SessionManager
+    kv_store: Arc<KeyValueStore>,         // No Mutex needed since KeyValueStore uses DashMap
+}
+
+// ===============================================
+// General helpers
+// ===============================================
 
 #[inline(always)]
 fn get_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("Failed to get system time, RIP")
         .as_secs()
 }
 
@@ -126,71 +232,216 @@ fn handle_list_command(request: &Request, kv_store: &KeyValueStore) -> Response 
 // End response helpers
 // ===============================================
 
-/// Run the server
-pub async fn run(host: impl Into<String>, port: u16) -> Result<(), Report> {
-    // Get the address to bind to
-    let addr = format!("{}:{}", host.into(), port);
+// ===============================================
+// Server helpers
+// ===============================================
 
-    // Log server start
-    log::info!("Starting bonka server on {}", &addr);
+#[inline(always)]
+fn set_file_descriptor_limits() {
+    // Try to get the current limits
+    let mut rlimit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
 
-    // Initialize server state
-    let state = Arc::new(Mutex::new(ServerState {
-        session_manager: SessionManager::new(),
-        kv_store: KeyValueStore::new(),
-    }));
+    // Get current limits
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlimit) } == 0 {
+        // Try to set higher limits if needed
+        let desired_soft_limit = 65536;
 
-    // Start session cleanup task
-    let cleanup_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            let mut state = cleanup_state.lock().unwrap();
-            state
-                .session_manager
-                .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
-            log::debug!(
-                "Cleaned up inactive sessions. Current count: {}",
-                state.session_manager.session_count()
+        if rlimit.rlim_max < desired_soft_limit as libc::rlim_t {
+            // Log that we can't set as high as we want
+            log::warn!(
+                "System hard limit for file descriptors is {} which is lower than desired {}. Consider increasing system limits.",
+                rlimit.rlim_max,
+                desired_soft_limit
             );
+
+            // Set to max allowed
+            rlimit.rlim_cur = rlimit.rlim_max;
+        } else {
+            // We can set to our desired limit
+            rlimit.rlim_cur = desired_soft_limit as libc::rlim_t;
         }
-    });
 
-    // Start the TCP server
-    let listener = TcpListener::bind(&addr).await.map_err(eyre::Report::from)?;
-    log::info!("Server listening on {}", addr);
-
-    while let Ok((stream, addr)) = listener.accept().await {
-        log::info!("New connection from: {}", addr);
-        let client_state = Arc::clone(&state);
-
-        // Handle each client in a separate task
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, addr.to_string(), client_state).await {
-                log::error!("Error handling client {}: {}", addr, e);
-            }
-        });
+        // Apply the new limits
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlimit) } != 0 {
+            log::warn!(
+                "Failed to set file descriptor limit: {}",
+                std::io::Error::last_os_error()
+            );
+        } else {
+            log::info!("Set file descriptor limit to {}", rlimit.rlim_cur);
+        }
+    } else {
+        log::warn!(
+            "Failed to get file descriptor limits: {}",
+            std::io::Error::last_os_error()
+        );
     }
+}
 
+#[inline(always)]
+fn get_max_connections() -> usize {
+    // Get the max connections from the environment variable or use a default
+    std::env::var("BONKA_CONNECTION_LIMIT")
+        .ok()
+        .and_then(|limit| limit.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            // Get system limit and set to half of that, or default to a reasonable value
+            let mut rlimit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlimit) } == 0 {
+                // Set to half of the soft limit to leave room for other file descriptors
+                (rlimit.rlim_cur as usize / 2).max(1000)
+            } else {
+                1000 // Default fallback
+            }
+        })
+}
+
+#[inline(always)]
+async fn acquire_permit(
+    semaphore: &Arc<Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ServerError> {
+    semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(ServerError::SemaphoreAcquire)
+}
+
+#[inline(always)]
+async fn apply_backoff_delay(current_delay: &mut Duration, max_delay: Duration) {
+    let jitter_factor = rand::random::<f32>() * 0.5 + 0.75; // Random float between 0.75 and 1.25
+    let jittered_delay =
+        Duration::from_millis((current_delay.as_millis() as f32 * jitter_factor) as u64);
+
+    log::debug!(
+        "Backing off for {}ms before next accept attempt",
+        jittered_delay.as_millis()
+    );
+    tokio::time::sleep(jittered_delay).await;
+
+    // Increase backoff delay for next failure (exponential)
+    *current_delay = std::cmp::min(*current_delay * 2, max_delay);
+}
+
+#[inline(always)]
+async fn run_session_cleanup(state: ServerState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    interval.tick().await;
+
+    loop {
+        interval.tick().await;
+
+        // No need to lock - SessionManager with DashMap is already thread-safe
+        state
+            .session_manager
+            .cleanup_inactive_sessions(Duration::from_secs(1800)); // 30 minutes
+
+        log::debug!(
+            "Cleaned up inactive sessions. Current count: {}",
+            state.session_manager.session_count()
+        );
+    }
+}
+
+#[inline(always)]
+fn configure_socket(socket: &socket2::Socket) -> Result<(), ServerError> {
+    socket.configure(|s| s.set_nonblocking(true))?;
+    socket.configure(|s| s.set_reuse_address(true))?;
+    socket.configure(|s| s.set_reuse_port(true))?;
+    socket.configure(|s| s.set_keepalive(true))?;
+    socket.configure(|s| s.set_send_buffer_size(1024 * 1024))?;
+    socket.configure(|s| s.set_recv_buffer_size(1024 * 1024))?;
     Ok(())
+}
+
+/// Create and configure the TCP listener
+#[inline(always)]
+async fn create_listener(addr: &str) -> Result<TcpListener, ServerError> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(ServerError::SocketBind)?;
+
+    // Configure the socket with more specific options
+    let socket = socket2::Socket::from(listener.into_std().map_err(ServerError::SocketBind)?);
+    configure_socket(&socket)?;
+
+    // Transform the socket back into a TcpListener
+    TcpListener::from_std(socket.into()).map_err(ServerError::SocketBind)
+}
+
+/// Initialize server state with thread-safe components
+#[inline(always)]
+fn init_server_state() -> ServerState {
+    ServerState {
+        session_manager: Arc::new(SessionManager::new()),
+        kv_store: Arc::new(KeyValueStore::new()),
+    }
+}
+
+/// Main server connection loop
+#[inline(always)]
+async fn run_connection_loop(
+    listener: TcpListener,
+    state: ServerState,
+    connection_limiter: Arc<Semaphore>,
+    current_delay: &mut Duration,
+    base_delay: Duration,
+    max_delay: Duration,
+) -> Result<(), ServerError> {
+    loop {
+        // Acquire a permit from the semaphore before accepting a new connection
+        let permit = acquire_permit(&connection_limiter).await?;
+
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                log::info!("New connection from: {}", addr);
+                // Clone the ServerState for the new client task
+                let client_state = state.clone();
+
+                // Reset backoff delay on successful connection
+                *current_delay = base_delay;
+
+                // Handle each client in a separate task
+                tokio::spawn(async move {
+                    // The permit is moved into this task and will be dropped when the task completes
+                    let _permit = permit;
+
+                    if let Err(e) = handle_client(stream, addr.to_string(), client_state).await {
+                        log::error!("Error handling client {}: {}", addr, e);
+                    }
+                });
+            }
+            Err(e) => {
+                // Drop the permit and apply backoff delay
+                log::error!("Failed to accept connection: {}", e);
+                drop(permit);
+                apply_backoff_delay(current_delay, max_delay).await;
+            }
+        }
+    }
 }
 
 /// Handle a client connection
 ///
 /// This function processes a client connection, handling requests and sending responses.
+#[inline(always)]
 async fn handle_client(
     stream: TcpStream,
     addr: String,
-    state: Arc<Mutex<ServerState>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Create a session for this client
-    let session_id = {
-        let mut server_state = state.lock().unwrap();
-        let session = server_state.session_manager.create_session(addr.clone());
-        session.id
-    };
+    state: ServerState,
+) -> Result<(), ServerError> {
+    // Set socket options for better performance
+    stream.configure(|s| s.set_nodelay(true))?;
+
+    // Create a session for this client - no lock needed with DashMap-based SessionManager
+    let session = state.session_manager.create_session(addr.clone());
+    let session_id = session.id;
 
     log::info!(
         "Created session {} for client {}",
@@ -205,7 +456,7 @@ async fn handle_client(
     while let Some(result) = framed.next().await {
         match result {
             Ok(bytes) => {
-                // Deserialize request using MessagePack
+                // Deserialize request
                 let request: Request = match Request::decode(bytes.as_ref()) {
                     Ok(req) => req,
                     Err(e) => {
@@ -225,14 +476,11 @@ async fn handle_client(
                     }
                 };
 
-                // Update session activity
-                {
-                    let mut server_state = state.lock().unwrap();
-                    server_state.session_manager.touch_session(session_id);
-                }
+                // Update session activity - no lock needed with DashMap-based SessionManager
+                state.session_manager.touch_session(session_id);
 
                 // Process the command
-                let response = process_command(request, &state).await;
+                let response = process_command(request, &state).await?;
 
                 // Send response
                 send_response(&mut framed, &response).await?;
@@ -250,16 +498,13 @@ async fn handle_client(
         }
     }
 
-    // Clean up session
-    {
-        let mut server_state = state.lock().unwrap();
-        log::info!(
-            "Removing session {} for client {}",
-            base62::encode(session_id),
-            addr
-        );
-        server_state.session_manager.remove_session(session_id);
-    }
+    // Clean up session - no lock needed with DashMap-based SessionManager
+    log::info!(
+        "Removing session {} for client {}",
+        base62::encode(session_id),
+        addr
+    );
+    state.session_manager.remove_session(session_id);
 
     log::info!("Connection closed for client {}", addr);
     Ok(())
@@ -268,33 +513,44 @@ async fn handle_client(
 /// Process a command and return a response
 ///
 /// This function processes a command from a client request and returns a response.
-async fn process_command(request: Request, state: &Arc<Mutex<ServerState>>) -> Response {
-    let server_state = state.lock().unwrap();
-    let kv_store = &server_state.kv_store;
+#[inline(always)]
+async fn process_command(request: Request, state: &ServerState) -> Result<Response, ServerError> {
+    // Direct access to KV store without locking
+    let kv_store = &state.kv_store;
 
-    match request.command_type() {
+    let result = match request.command_type() {
         CommandType::CommandGet => handle_get_command(&request, kv_store),
         CommandType::CommandSet => handle_set_command(&request, kv_store),
         CommandType::CommandDelete => handle_delete_command(&request, kv_store),
         CommandType::CommandList => handle_list_command(&request, kv_store),
         CommandType::CommandExit => create_exit_response(request.id),
         _ => create_error_response(request.id, "Unknown command".to_string()),
-    }
+    };
+
+    Ok(result)
 }
 
 /// Send a response to the client
 ///
-/// This function serializes the response using MessagePack and sends it to the client.
+/// This function serializes the response using protobuf and sends it to the client.
+#[inline(always)]
 async fn send_response(
     framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
     response: &Response,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ServerError> {
     // Serialize response using protobuf
     let encoded = response.encode_to_vec();
     // Send the response
-    framed.send(Bytes::from(encoded)).await?;
+    framed
+        .send(Bytes::from(encoded))
+        .await
+        .map_err(ServerError::SendResponse)?;
     Ok(())
 }
+
+// ===============================================
+// End server helpers
+// ===============================================
 
 #[cfg(test)]
 mod tests {
