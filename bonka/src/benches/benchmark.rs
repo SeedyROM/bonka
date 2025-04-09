@@ -1,7 +1,3 @@
-use bonka::kv::KeyValueStore;
-use bonka::kv::Value;
-use bonka::proto;
-use bonka::proto::{CommandType, ResultType};
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use futures::future::join_all;
@@ -11,6 +7,11 @@ use rand::{Rng, distr::Alphanumeric};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
+
+use bonka::kv::KeyValueStore;
+use bonka::kv::Value;
+use bonka::proto;
+use bonka::proto::{CommandType, ResultType};
 
 fn get_timestamp() -> u64 {
     SystemTime::now()
